@@ -1,0 +1,5 @@
+D:\Проекты\BunnyBlack\publish\BunnyBlack.dll.config
+D:\Проекты\BunnyBlack\publish\Microsoft.Web.WebView2.Core.xml
+D:\Проекты\BunnyBlack\publish\Microsoft.Web.WebView2.WinForms.xml
+D:\Проекты\BunnyBlack\publish\Microsoft.Web.WebView2.Wpf.xml
+D:\Проекты\BunnyBlack\publish\BunnyBlack.exe

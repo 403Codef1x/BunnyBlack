@@ -1,0 +1,10 @@
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\bin\Release\net48\BunnyBlack.exe.config
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\bin\Release\net48\BunnyBlack.exe
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\bin\Release\net48\BunnyBlack.pdb
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\obj\Release\net48\BunnyBlack.csproj.AssemblyReference.cache
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\obj\Release\net48\BunnyBlack.Properties.Resources.resources
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\obj\Release\net48\BunnyBlack.csproj.GenerateResource.cache
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\obj\Release\net48\BunnyBlack.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\obj\Release\net48\BunnyBlack.csproj.CoreCompileInputs.cache
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\obj\Release\net48\BunnyBlack.exe
+C:\Users\Codef1x\Desktop\BunnyBlack\BunnyBlack\obj\Release\net48\BunnyBlack.pdb
