@@ -1,25 +1,27 @@
-﻿using System;
+﻿// language: C#, file: Forms/SettingsForm.cs
+// Полная замена.
+// TopMost по умолчанию включён. Если ключа нет — ставим 1.
+// Сохранены: LoadSettings, SaveSettings, NormalizeStartupPath, AddToStartup, RemoveFromStartup.
+using System;
 using System.Drawing;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using System.Diagnostics;
+using BunnyBlack.Core;
 
 namespace BunnyBlack.Forms
 {
     public partial class SettingsForm : UserControl
     {
-        private CheckBox topCheck;
         private CheckBox trayCheck;
+        private CheckBox topMostCheck;
         private bool isWinRE;
-        private Form parentForm;
 
         public SettingsForm(bool winRE)
         {
             isWinRE = winRE;
             this.BackColor = Color.FromArgb(13, 13, 13);
             this.ForeColor = Color.FromArgb(216, 216, 216);
-
-            parentForm = this.FindForm();
 
             InitializeComponent();
             LoadSettings();
@@ -37,11 +39,11 @@ namespace BunnyBlack.Forms
                 Padding = new Padding(28, 24, 28, 20),
                 BackColor = Color.FromArgb(13, 13, 13)
             };
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50)); // Строка для кнопки сайта
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));   // заголовок
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 95));   // окно
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));   // автозагрузка
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));   // кнопка
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // пусто
 
             var title = new Label
             {
@@ -53,7 +55,7 @@ namespace BunnyBlack.Forms
             };
             layout.Controls.Add(title, 0, 0);
 
-            // Окно
+            // ===== ОКНО =====
             var winGroup = new GroupBox
             {
                 Text = "Окно",
@@ -62,26 +64,14 @@ namespace BunnyBlack.Forms
                 Font = new Font("Segoe UI", 11),
                 BackColor = Color.FromArgb(22, 22, 22)
             };
-            var winLayout = new TableLayoutPanel
+            var winLayout = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 2,
+                FlowDirection = FlowDirection.TopDown,
                 Padding = new Padding(10, 8, 10, 8),
-                BackColor = Color.Transparent
+                BackColor = Color.Transparent,
+                WrapContents = false
             };
-
-            topCheck = new CheckBox
-            {
-                Text = "Держать окно поверх всех окон",
-                ForeColor = Color.FromArgb(216, 216, 216),
-                Font = new Font("Segoe UI", 11),
-                AutoSize = true,
-                Checked = true,
-                BackColor = Color.Transparent
-            };
-            topCheck.CheckedChanged += (s, e) => ApplyTopMost();
-            winLayout.Controls.Add(topCheck, 0, 0);
 
             trayCheck = new CheckBox
             {
@@ -92,12 +82,23 @@ namespace BunnyBlack.Forms
                 Checked = true,
                 BackColor = Color.Transparent
             };
-            winLayout.Controls.Add(trayCheck, 0, 1);
+            winLayout.Controls.Add(trayCheck);
+
+            topMostCheck = new CheckBox
+            {
+                Text = "Поверх всех окон",
+                ForeColor = Color.FromArgb(216, 216, 216),
+                Font = new Font("Segoe UI", 11),
+                AutoSize = true,
+                Checked = true,     // дефолт включён
+                BackColor = Color.Transparent
+            };
+            winLayout.Controls.Add(topMostCheck);
 
             winGroup.Controls.Add(winLayout);
             layout.Controls.Add(winGroup, 0, 1);
 
-            // Автозагрузка
+            // ===== АВТОЗАГРУЗКА =====
             var startupGroup = new GroupBox
             {
                 Text = "Автозагрузка программы",
@@ -147,31 +148,26 @@ namespace BunnyBlack.Forms
             startupGroup.Controls.Add(startupLayout);
             layout.Controls.Add(startupGroup, 0, 2);
 
-            // ============================================================
-            // КНОПКА ОТКРЫТЬ САЙТ
-            // ============================================================
-            var siteBtn = new Button
+            // ===== СОХРАНИТЬ =====
+            var saveBtn = new Button
             {
-                Text = "Открыть сайт программы",
-                Height = 35,
+                Text = "Сохранить настройки",
+                Height = 40,
                 Width = 220,
-                BackColor = Color.FromArgb(20, 30, 50), // Темно-синий стиль
-                ForeColor = Color.FromArgb(150, 200, 255),
+                BackColor = Color.FromArgb(15, 34, 24),
+                ForeColor = Color.FromArgb(136, 221, 170),
                 FlatStyle = FlatStyle.Flat,
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(60, 80, 120) },
-                Font = new Font("Segoe UI", 11),
+                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(51, 102, 68) },
                 Cursor = Cursors.Hand,
+                Font = new Font("Segoe UI", 11, FontStyle.Bold),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left
             };
-            siteBtn.Click += (s, e) => OpenWebsite();
-            layout.Controls.Add(siteBtn, 0, 3);
+            saveBtn.Click += (s, e) => SaveSettings();
+            layout.Controls.Add(saveBtn, 0, 3);
 
             this.Controls.Add(layout);
         }
 
-        // ============================================================
-        // ЗАГРУЗКА НАСТРОЕК ИЗ РЕЕСТРА
-        // ============================================================
         private void LoadSettings()
         {
             try
@@ -180,86 +176,37 @@ namespace BunnyBlack.Forms
                 {
                     if (key != null)
                     {
-                        object topValue = key.GetValue("TopMost");
-                        if (topValue != null)
-                            topCheck.Checked = topValue.ToString() == "1";
-                        else
-                            topCheck.Checked = true;
-
                         object trayValue = key.GetValue("TrayEnabled");
-                        if (trayValue != null)
-                            trayCheck.Checked = trayValue.ToString() == "1";
-                        else
-                            trayCheck.Checked = true;
+                        trayCheck.Checked = trayValue == null || trayValue.ToString() == "1";
+
+                        object tmValue = key.GetValue("TopMost");
+                        topMostCheck.Checked = tmValue == null || tmValue.ToString() == "1";
                     }
                     else
                     {
-                        topCheck.Checked = true;
+                        // Первый запуск — дефолт оба включены
                         trayCheck.Checked = true;
+                        topMostCheck.Checked = true;
+
+                        // сразу пишем в реестр, чтобы MainForm читал согласованное значение
+                        try
+                        {
+                            using (var writeKey = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\BunnyBlack\Settings"))
+                            {
+                                if (writeKey != null)
+                                {
+                                    writeKey.SetValue("TrayEnabled", "1");
+                                    writeKey.SetValue("TopMost", "1");
+                                }
+                            }
+                        }
+                        catch { }
                     }
                 }
-
-                ApplyTopMost();
-                ApplyTrayBehavior();
             }
             catch { }
         }
 
-        // ============================================================
-        // ПРИМЕНЕНИЕ TOPMOST
-        // ============================================================
-        private void ApplyTopMost()
-        {
-            try
-            {
-                if (parentForm != null && !parentForm.IsDisposed)
-                {
-                    parentForm.TopMost = topCheck.Checked;
-                }
-            }
-            catch { }
-        }
-
-        // ============================================================
-        // ПРИМЕНЕНИЕ ПОВЕДЕНИЯ ТРЕЯ
-        // ============================================================
-        private void ApplyTrayBehavior()
-        {
-            try
-            {
-                if (parentForm != null && !parentForm.IsDisposed && parentForm is MainForm mainForm)
-                {
-                    mainForm.SetTrayMode(trayCheck.Checked);
-                }
-            }
-            catch { }
-        }
-
-        // ============================================================
-        // ОТКРЫТИЕ САЙТА (ИСПРАВЛЕНА ОШИБКА .NET 8)
-        // ============================================================
-        private void OpenWebsite()
-        {
-            try
-            {
-                string url = "https://bunnyblack.ct.ws/";
-
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = url,
-                    UseShellExecute = true // ВАЖНО: Без этого .NET 8 ищет файл, а не открывает ссылку
-                };
-                Process.Start(psi);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Не удалось открыть ссылку: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        // ============================================================
-        // СОХРАНЕНИЕ НАСТРОЕК
-        // ============================================================
         private void SaveSettings()
         {
             try
@@ -268,42 +215,41 @@ namespace BunnyBlack.Forms
                 {
                     if (key != null)
                     {
-                        key.SetValue("TopMost", topCheck.Checked ? "1" : "0");
                         key.SetValue("TrayEnabled", trayCheck.Checked ? "1" : "0");
+                        key.SetValue("TopMost", topMostCheck.Checked ? "1" : "0");
                     }
                 }
 
-                ApplyTopMost();
-                ApplyTrayBehavior();
+                MainForm mainForm = null;
+                foreach (Form f in Application.OpenForms)
+                {
+                    if (f is MainForm mf) { mainForm = mf; break; }
+                }
 
-                MessageBox.Show("Настройки сохранены", "Успешно",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (mainForm != null)
+                {
+                    mainForm.SetTrayMode(trayCheck.Checked);
+                    mainForm.SetTopMostMode(topMostCheck.Checked);
+                }
+
+                NedoMessageBox.Show("Настройки сохранены");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка сохранения: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                NedoMessageBox.Show($"Ошибка сохранения: {ex.Message}", isError: true);
             }
         }
 
-        // ============================================================
-        // НОРМАЛИЗАЦИЯ ПУТИ (ДЛЯ WINRE)
-        // ============================================================
         private string NormalizeStartupPath(string path)
         {
             if (string.IsNullOrWhiteSpace(path)) return path;
 
             if (isWinRE && path.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase))
-            {
                 return @"C:\" + path.Substring(3);
-            }
 
             return path;
         }
 
-        // ============================================================
-        // ДОБАВЛЕНИЕ В АВТОЗАГРУЗКУ
-        // ============================================================
         private void AddToStartup()
         {
             try
@@ -314,21 +260,16 @@ namespace BunnyBlack.Forms
                     {
                         string exePath = NormalizeStartupPath(Process.GetCurrentProcess().MainModule.FileName);
                         key.SetValue("BunnyBlack", exePath);
-                        MessageBox.Show("Добавлено в автозагрузку", "Успешно",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        NedoMessageBox.Show("Добавлено в автозагрузку");
                     }
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                NedoMessageBox.Show($"Ошибка: {ex.Message}", isError: true);
             }
         }
 
-        // ============================================================
-        // УДАЛЕНИЕ ИЗ АВТОЗАГРУЗКИ
-        // ============================================================
         private void RemoveFromStartup()
         {
             try
@@ -338,15 +279,13 @@ namespace BunnyBlack.Forms
                     if (key != null && key.GetValue("BunnyBlack") != null)
                     {
                         key.DeleteValue("BunnyBlack");
-                        MessageBox.Show("Убрано из автозагрузки", "Успешно",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        NedoMessageBox.Show("Убрано из автозагрузки");
                     }
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                NedoMessageBox.Show($"Ошибка: {ex.Message}", isError: true);
             }
         }
     }

@@ -1,8 +1,14 @@
-﻿using System;
+﻿// language: C#, file: MainForm.cs
+// Полная замена. «Файлы» и «Питание» перенесены внутрь «Встроенные программы».
+// Навигация: Автозагрузка, Сканер, Пользователи, Доп.Возможности,
+// Встроенные программы, Кликер, Настройки.
+using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using BunnyBlack.Forms;
+using BunnyBlack.Core;
 
 namespace BunnyBlack
 {
@@ -10,20 +16,18 @@ namespace BunnyBlack
     {
         private Panel sidebar;
         private Panel contentPanel;
+        private Panel modeBanner;
+        private Label modeBannerLabel;
         private Button[] navButtons;
         private Label statusLabel;
         private bool isWinRE;
         private bool isDarkTheme = true;
 
         private NotifyIcon trayIcon;
+        private EventHandler trayResizeHandler;
 
-        // КЭШ ВСЕХ ФОРМ (создаются 1 раз при старте)
-        private AutostartForm cachedAutostart;
-        private ScanForm cachedScan;
-        private UsersForm cachedUsers;
-        private ToolsForm cachedTools;
-        private BrowserForm cachedBrowser;
-        private SettingsForm cachedSettings;
+        private readonly Dictionary<int, Func<UserControl>> pageFactories;
+        private readonly Dictionary<int, UserControl> loadedPages = new Dictionary<int, UserControl>();
 
         public MainForm(bool winRE, string windowTitle)
         {
@@ -31,71 +35,47 @@ namespace BunnyBlack
             this.BackColor = Color.FromArgb(13, 13, 13);
             this.ForeColor = Color.FromArgb(216, 216, 216);
 
-            InitializeComponent();
+            try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+            catch { }
 
+            InitializeComponent();
             this.Text = windowTitle;
 
-            // Загрузка настроек
+            UpdateModeBanner();
+            if (winRE) this.Opacity = 0.98;
+
+            pageFactories = new Dictionary<int, Func<UserControl>>
+            {
+                [0] = () => new AutostartForm(isWinRE),
+                [1] = () => new ScanForm(isWinRE),
+                [2] = () => new UsersForm(isWinRE),
+                [3] = () => new ToolsForm(isWinRE),
+                [4] = () => new BrowserForm(isWinRE),
+                [5] = () => new ClickerForm(isWinRE),
+                [6] = () => new SettingsForm(isWinRE),
+            };
+
+            this.TopMost = true;
+
+            bool trayEnabled = true;
             try
             {
                 using (var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\BunnyBlack\Settings"))
                 {
                     if (key != null)
                     {
-                        object topVal = key.GetValue("TopMost");
-                        if (topVal != null) this.TopMost = topVal.ToString() == "1";
-                        else this.TopMost = true;
-
-                        object trayVal = key.GetValue("TrayEnabled");
-                        if (trayVal != null) SetTrayMode(trayVal.ToString() == "1");
-                        else SetTrayMode(true);
-                    }
-                    else
-                    {
-                        this.TopMost = true;
-                        SetTrayMode(true);
+                        object te = key.GetValue("TrayEnabled");
+                        if (te != null) trayEnabled = te.ToString() == "1";
                     }
                 }
             }
-            catch
-            {
-                this.TopMost = true;
-                SetTrayMode(true);
-            }
+            catch { }
 
-            // ============================================================
-            // ПРЕДВАРИТЕЛЬНОЕ СОЗДАНИЕ ВСЕХ ВКЛАДОК (КЭШИРОВАНИЕ)
-            // ============================================================
-            cachedAutostart = new AutostartForm(isWinRE);
-            cachedScan = new ScanForm(isWinRE);
-            cachedUsers = new UsersForm(isWinRE);
-            cachedTools = new ToolsForm(isWinRE);
-            cachedBrowser = new BrowserForm(isWinRE);
-            cachedSettings = new SettingsForm(isWinRE);
-
-            // Добавляем их в панель, но скрываем все, кроме первой
-            contentPanel.Controls.Add(cachedAutostart);
-            contentPanel.Controls.Add(cachedScan);
-            contentPanel.Controls.Add(cachedUsers);
-            contentPanel.Controls.Add(cachedTools);
-            contentPanel.Controls.Add(cachedBrowser);
-            contentPanel.Controls.Add(cachedSettings);
-
-            cachedAutostart.Dock = DockStyle.Fill;
-            cachedScan.Dock = DockStyle.Fill;
-            cachedUsers.Dock = DockStyle.Fill;
-            cachedTools.Dock = DockStyle.Fill;
-            cachedBrowser.Dock = DockStyle.Fill;
-            cachedSettings.Dock = DockStyle.Fill;
-
-            // Скрываем всё, кроме первой
-            cachedScan.Visible = false;
-            cachedUsers.Visible = false;
-            cachedTools.Visible = false;
-            cachedBrowser.Visible = false;
-            cachedSettings.Visible = false;
-
+            SetTrayMode(trayEnabled);
             ShowPage(0);
+
+            this.BringToFront();
+            this.Activate();
         }
 
         public void SetFullScreenMode(bool enable)
@@ -104,37 +84,35 @@ namespace BunnyBlack
             {
                 this.FormBorderStyle = FormBorderStyle.None;
                 this.WindowState = FormWindowState.Maximized;
-                this.TopMost = true;
                 this.BringToFront();
             }
             else
             {
                 this.FormBorderStyle = FormBorderStyle.Sizable;
                 this.WindowState = FormWindowState.Normal;
-                this.TopMost = false;
             }
         }
 
         private void InitializeComponent()
         {
-            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(MainForm));
-            this.SuspendLayout();
-            this.ClientSize = new System.Drawing.Size(1479, 825);
-            this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
+            this.ClientSize = new Size(1479, 825);
             this.Name = "MainForm";
             this.StartPosition = FormStartPosition.CenterScreen;
 
-            sidebar = new Panel
-            {
-                Dock = DockStyle.Left,
-                Width = 200,
-                BackColor = Color.FromArgb(18, 18, 18)
-            };
-            contentPanel = new Panel
+            sidebar = new Panel { Dock = DockStyle.Left, Width = 200, BackColor = Color.FromArgb(18, 18, 18) };
+            contentPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(13, 13, 13) };
+
+            modeBanner = new Panel { Dock = DockStyle.Top, Height = 26, BackColor = Color.FromArgb(22, 22, 22) };
+            modeBannerLabel = new Label
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(13, 13, 13)
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = Color.FromArgb(200, 200, 200),
+                BackColor = Color.Transparent
             };
+            modeBanner.Controls.Add(modeBannerLabel);
+
             statusLabel = new Label
             {
                 Dock = DockStyle.Bottom,
@@ -148,23 +126,33 @@ namespace BunnyBlack
             Controls.Add(contentPanel);
             Controls.Add(sidebar);
             Controls.Add(statusLabel);
+            Controls.Add(modeBanner);
 
             BuildSidebar();
-            this.ResumeLayout(false);
+        }
+
+        private void UpdateModeBanner()
+        {
+            if (isWinRE)
+            {
+                modeBanner.BackColor = Color.FromArgb(60, 40, 15);
+                modeBannerLabel.Text = "⚙  WinRE — оффлайн-режим (изменения применяются к целевой системе)";
+                modeBannerLabel.ForeColor = Color.FromArgb(255, 200, 120);
+            }
+            else
+            {
+                modeBanner.BackColor = Color.FromArgb(15, 40, 25);
+                modeBannerLabel.Text = "●  Online — работа с текущей системой";
+                modeBannerLabel.ForeColor = Color.FromArgb(136, 221, 170);
+            }
         }
 
         private void BuildSidebar()
         {
-            var panel = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.Transparent,
-                AutoScroll = false
-            };
-
+            var panel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
             int y = 16;
 
-            var logo = new Label
+            panel.Controls.Add(new Label
             {
                 Text = "Bunny Black",
                 Font = new Font("Segoe UI", 16, FontStyle.Bold),
@@ -174,11 +162,10 @@ namespace BunnyBlack
                 Height = 45,
                 BackColor = Color.Transparent,
                 Location = new Point(8, y)
-            };
-            panel.Controls.Add(logo);
+            });
             y += 55;
 
-            var sub = new Label
+            panel.Controls.Add(new Label
             {
                 Text = "System Recovery",
                 Font = new Font("Segoe UI", 10),
@@ -188,42 +175,26 @@ namespace BunnyBlack
                 Height = 25,
                 BackColor = Color.Transparent,
                 Location = new Point(8, y)
-            };
-            panel.Controls.Add(sub);
+            });
             y += 35;
 
-            var sep2 = new Panel
-            {
-                Height = 1,
-                BackColor = Color.FromArgb(37, 37, 37),
-                Location = new Point(8, y),
-                Width = 184
-            };
-            panel.Controls.Add(sep2);
+            panel.Controls.Add(new Panel { Height = 1, BackColor = Color.FromArgb(37, 37, 37), Location = new Point(8, y), Width = 184 });
             y += 11;
-
-            var sep3 = new Panel
-            {
-                Height = 10,
-                BackColor = Color.Transparent,
-                Location = new Point(8, y),
-                Width = 184
-            };
-            panel.Controls.Add(sep3);
+            panel.Controls.Add(new Panel { Height = 10, BackColor = Color.Transparent, Location = new Point(8, y), Width = 184 });
             y += 10;
 
             var pages = new (string text, int index)[]
             {
                 ("Автозагрузка", 0),
-                ("Сканирование", 1),
+                ("Сканер", 1),
                 ("Пользователи", 2),
                 ("Доп.Возможности", 3),
                 ("Встроенные программы", 4),
-                ("Настройки", 5),
+                ("Кликер", 5),
+                ("Настройки", 6),
             };
 
             navButtons = new Button[pages.Length];
-
             for (int i = 0; i < pages.Length; i++)
             {
                 var btn = new Button
@@ -235,22 +206,19 @@ namespace BunnyBlack
                     ForeColor = Color.FromArgb(140, 140, 140),
                     TextAlign = ContentAlignment.MiddleLeft,
                     Padding = new Padding(14, 8, 8, 8),
-                    Font = new Font("Segoe UI", 13),
+                    Font = new Font("Segoe UI", 12),
                     Height = 40,
                     Width = 184,
                     Cursor = Cursors.Hand,
                     BackColor = Color.Transparent,
-                    AutoEllipsis = false,
                     UseCompatibleTextRendering = true,
                     Location = new Point(8, y)
                 };
-
                 int idx = i;
                 btn.Click += (s, e) => ShowPage(idx);
-
                 panel.Controls.Add(btn);
                 navButtons[i] = btn;
-                y += 46;
+                y += 44;
             }
 
             sidebar.Controls.Add(panel);
@@ -259,54 +227,24 @@ namespace BunnyBlack
         public void ApplyTheme(bool useDark)
         {
             isDarkTheme = useDark;
-
             Color bgColor = useDark ? Color.FromArgb(13, 13, 13) : Color.FromArgb(235, 235, 235);
             Color fgColor = useDark ? Color.FromArgb(216, 216, 216) : Color.FromArgb(30, 30, 30);
             Color sidebarColor = useDark ? Color.FromArgb(18, 18, 18) : Color.FromArgb(230, 230, 230);
-            Color logoColor = useDark ? Color.FromArgb(240, 240, 240) : Color.FromArgb(20, 20, 20);
-            Color subColor = useDark ? Color.FromArgb(102, 102, 102) : Color.FromArgb(80, 80, 80);
-            Color sepColor = useDark ? Color.FromArgb(37, 37, 37) : Color.FromArgb(180, 180, 180);
 
             this.BackColor = bgColor;
             this.ForeColor = fgColor;
             contentPanel.BackColor = bgColor;
             sidebar.BackColor = sidebarColor;
             statusLabel.BackColor = sidebarColor;
-            statusLabel.ForeColor = useDark ? Color.FromArgb(170, 170, 170) : Color.FromArgb(70, 70, 70);
-
-            foreach (Control ctrl in sidebar.Controls)
-            {
-                if (ctrl is Panel p)
-                {
-                    foreach (Control child in p.Controls)
-                    {
-                        if (child is Label lbl)
-                        {
-                            if (lbl.Text == "Bunny Black")
-                                lbl.ForeColor = logoColor;
-                            if (lbl.Text == "System Recovery")
-                                lbl.ForeColor = subColor;
-                        }
-                        if (child is Panel sep && sep.Height == 1)
-                            sep.BackColor = sepColor;
-                    }
-                }
-            }
-
-            foreach (var btn in navButtons)
-            {
-                if (btn.BackColor == Color.Transparent)
-                {
-                    btn.ForeColor = useDark ? Color.FromArgb(140, 140, 140) : Color.FromArgb(60, 60, 60);
-                }
-                else
-                {
-                    btn.ForeColor = useDark ? Color.FromArgb(240, 240, 240) : Color.FromArgb(20, 20, 20);
-                }
-            }
 
             this.Invalidate();
             this.Update();
+        }
+
+        public void SetTopMostMode(bool enabled)
+        {
+            this.TopMost = enabled;
+            if (enabled) { this.BringToFront(); this.Activate(); }
         }
 
         public void SetTrayMode(bool enabled)
@@ -320,43 +258,26 @@ namespace BunnyBlack
                     trayIcon.Text = "Bunny Black";
                     trayIcon.Visible = true;
 
-                    ContextMenuStrip trayMenu = new ContextMenuStrip();
-                    trayMenu.Items.Add("Открыть", null, (s, e) =>
-                    {
-                        this.Show();
-                        this.WindowState = FormWindowState.Normal;
-                        this.BringToFront();
-                    });
-                    trayMenu.Items.Add("Выход", null, (s, e) => Application.Exit());
-                    trayIcon.ContextMenuStrip = trayMenu;
-
-                    trayIcon.DoubleClick += (s, e) =>
-                    {
-                        this.Show();
-                        this.WindowState = FormWindowState.Normal;
-                        this.BringToFront();
-                    };
+                    var menu = new ContextMenuStrip();
+                    menu.Items.Add("Открыть", null, (s, e) => { Show(); WindowState = FormWindowState.Normal; BringToFront(); });
+                    menu.Items.Add("Выход", null, (s, e) => Application.Exit());
+                    trayIcon.ContextMenuStrip = menu;
+                    trayIcon.DoubleClick += (s, e) => { Show(); WindowState = FormWindowState.Normal; BringToFront(); };
                 }
-
                 trayIcon.Visible = true;
 
-                this.Resize += (s, e) =>
+                if (trayResizeHandler != null) { this.Resize -= trayResizeHandler; trayResizeHandler = null; }
+                trayResizeHandler = (s, e) =>
                 {
-                    if (this.WindowState == FormWindowState.Minimized && trayIcon.Visible)
-                    {
-                        this.Hide();
-                    }
+                    if (WindowState == FormWindowState.Minimized && trayIcon != null && trayIcon.Visible) Hide();
                 };
+                this.Resize += trayResizeHandler;
             }
             else
             {
-                if (trayIcon != null)
-                {
-                    trayIcon.Visible = false;
-                    trayIcon.Dispose();
-                    trayIcon = null;
-                }
-                this.WindowState = FormWindowState.Normal;
+                if (trayResizeHandler != null) { this.Resize -= trayResizeHandler; trayResizeHandler = null; }
+                if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); trayIcon = null; }
+                WindowState = FormWindowState.Normal;
             }
         }
 
@@ -364,32 +285,26 @@ namespace BunnyBlack
         {
             for (int i = 0; i < navButtons.Length; i++)
             {
-                if (i == index)
-                {
-                    navButtons[i].ForeColor = isDarkTheme ? Color.FromArgb(240, 240, 240) : Color.FromArgb(20, 20, 20);
-                    navButtons[i].BackColor = Color.Transparent;
-                }
-                else
-                {
-                    navButtons[i].ForeColor = isDarkTheme ? Color.FromArgb(140, 140, 140) : Color.FromArgb(60, 60, 60);
-                    navButtons[i].BackColor = Color.Transparent;
-                }
+                navButtons[i].ForeColor = i == index
+                    ? Color.FromArgb(240, 240, 240)
+                    : Color.FromArgb(140, 140, 140);
+                navButtons[i].BackColor = Color.Transparent;
             }
 
-            // МГНОВЕННОЕ ПЕРЕКЛЮЧЕНИЕ: Меняем Visible, а не пересоздаём
-            cachedAutostart.Visible = (index == 0);
-            cachedScan.Visible = (index == 1);
-            cachedUsers.Visible = (index == 2);
-            cachedTools.Visible = (index == 3);
-            cachedBrowser.Visible = (index == 4);
-            cachedSettings.Visible = (index == 5);
-
-            // Если пользователь впервые открыл Сканирование, запускаем авто-скан в фоне
-            if (index == 1 && !cachedScan.IsScanCompleted)
+            if (!loadedPages.ContainsKey(index))
             {
-                // Запускаем сканирование асинхронно, не блокируя интерфейс
-                cachedScan.BeginAutoScan();
+                var ctrl = pageFactories[index]();
+                ctrl.Dock = DockStyle.Fill;
+                ctrl.Visible = false;
+                contentPanel.Controls.Add(ctrl);
+                loadedPages[index] = ctrl;
             }
+
+            foreach (var kv in loadedPages)
+                kv.Value.Visible = (kv.Key == index);
+
+            if (index == 1 && loadedPages[1] is ScanForm sf && !sf.IsScanCompleted)
+                sf.BeginAutoScan();
 
             SetStatus($"Страница: {navButtons[index].Text}");
         }
@@ -397,13 +312,9 @@ namespace BunnyBlack
         public void SetStatus(string text)
         {
             if (statusLabel.InvokeRequired)
-            {
                 statusLabel.Invoke(new Action(() => statusLabel.Text = text));
-            }
             else
-            {
                 statusLabel.Text = text;
-            }
         }
     }
 }

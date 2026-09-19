@@ -4,17 +4,16 @@
     "frameworks": [
       {
         "name": "Microsoft.NETCore.App",
-        "version": "8.0.28"
+        "version": "8.0.30"
       },
       {
         "name": "Microsoft.WindowsDesktop.App",
-        "version": "8.0.28"
+        "version": "8.0.30"
       }
     ],
     "additionalProbingPaths": [
       "C:\\Users\\Codef1x\\.dotnet\\store\\|arch|\\|tfm|",
-      "C:\\Users\\Codef1x\\.nuget\\packages",
-      "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+      "C:\\Users\\Codef1x\\.nuget\\packages"
     ],
     "configProperties": {
       "CSWINRT_USE_WINDOWS_UI_XAML_PROJECTIONS": false,

@@ -1,14 +1,35 @@
-﻿using System;
+﻿// language: C#, file: Forms/ToolsForm.cs
+// Полная замена.
+// Убраны пункты: «Снять блокировки», «Открыть карантин», «Разблокировать и удалить файл».
+// Остались: sethc/utilman, sfc, UAC, WinRE.
+using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
-using Microsoft.Win32;
+using BunnyBlack.Core;
 
 namespace BunnyBlack.Forms
 {
     public partial class ToolsForm : UserControl
     {
         private bool isWinRE;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+            int X, int Y, int cx, int cy, uint uFlags);
+
+        private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_SHOWWINDOW = 0x0040;
 
         public ToolsForm(bool winRE)
         {
@@ -43,12 +64,7 @@ namespace BunnyBlack.Forms
             };
             layout.Controls.Add(title, 0, 0);
 
-            var scroll = new Panel
-            {
-                Dock = DockStyle.Fill,
-                AutoScroll = true,
-                BackColor = Color.Transparent
-            };
+            var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.Transparent };
 
             var flow = new FlowLayoutPanel
             {
@@ -61,15 +77,10 @@ namespace BunnyBlack.Forms
 
             var tools = new (string name, string desc, Action action)[]
             {
-                ("Выйти из пользователя", "Завершает сеанс текущего пользователя", LogOff),
-                ("Войти в WinRE", "Перезагружает компьютер в среду восстановления", EnterWinRE),
-                ("Выполнить", "Открывает окно 'Выполнить'", RunDialog),
-                ("Вернуть русский язык", "Восстанавливает русскую раскладку клавиатуры", RestoreRussianKeyboard),
-                ("Починить шрифты", "Восстанавливает системные шрифты", RestoreFonts),
-                ("Вернуть стандартную тему", "Восстанавливает стандартную тему Windows", RestoreDefaultTheme),
+                ("Заменить sethc и utilman", "Заменяет sethc.exe и utilman.exe на Bunny Black (только WinRE)", ReplaceSethcUtilman),
+                ("sfc /scannow", "Проверяет целостность системных файлов (диск определится сам)", RunSfcScannow),
                 ("Включить UAC", "Включает контроль учётных записей", EnableUAC),
-                ("sfc /scannow", "Проверяет целостность системных файлов", RunSfcScannow),
-                ("Заменить sethc и utilman", "Заменяет sethc.exe и utilman.exe на BunnyBlack (Только WinRE)", ReplaceSethcUtilman),
+                ("Войти в WinRE", "Перезагружает компьютер в среду восстановления", EnterWinRE),
             };
 
             foreach (var tool in tools)
@@ -113,25 +124,23 @@ namespace BunnyBlack.Forms
             info.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
             info.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
 
-            var nameLabel = new Label
+            info.Controls.Add(new Label
             {
                 Text = name,
                 Font = new Font("Segoe UI", 12, FontStyle.Bold),
                 ForeColor = Color.FromArgb(240, 240, 240),
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent
-            };
-            info.Controls.Add(nameLabel, 0, 0);
+            }, 0, 0);
 
-            var descLabel = new Label
+            info.Controls.Add(new Label
             {
                 Text = desc,
                 Font = new Font("Segoe UI", 10),
                 ForeColor = Color.FromArgb(102, 102, 102),
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent
-            };
-            info.Controls.Add(descLabel, 0, 1);
+            }, 0, 1);
 
             layout.Controls.Add(info, 0, 0);
 
@@ -141,10 +150,7 @@ namespace BunnyBlack.Forms
                 Width = 130,
                 Height = 38,
                 FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false,
-                BackColor = Color.Transparent,
-                Padding = new Padding(0, 0, 0, 0),
-                Margin = new Padding(0, 0, 0, 0)
+                BackColor = Color.Transparent
             };
 
             var btn = new Button
@@ -158,12 +164,13 @@ namespace BunnyBlack.Forms
                 FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(60, 60, 60) },
                 Cursor = Cursors.Hand,
                 Font = new Font("Segoe UI", 11),
-                UseVisualStyleBackColor = false,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Padding = new Padding(0, 0, 0, 0),
-                Margin = new Padding(0, 0, 0, 0)
+                UseVisualStyleBackColor = false
             };
-            btn.Click += (s, e) => ExecuteAction(action, name);
+            btn.Click += (s, e) =>
+            {
+                try { action(); }
+                catch (Exception ex) { NedoMessageBox.Show("Ошибка: " + ex.Message, isError: true); }
+            };
 
             btnContainer.Controls.Add(btn);
             layout.Controls.Add(btnContainer, 1, 0);
@@ -172,201 +179,24 @@ namespace BunnyBlack.Forms
             return panel;
         }
 
-        private void ExecuteAction(Action action, string toolName)
-        {
-            try
-            {
-                action();
-                MessageBox.Show($"✅ {toolName} выполнено!", "Успешно",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"❌ Ошибка: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void RunCmd(string command)
-        {
-            try
-            {
-                var startInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = "/c " + command,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-
-                using (var process = System.Diagnostics.Process.Start(startInfo))
-                {
-                    if (process != null)
-                    {
-                        process.WaitForExit();
-                        if (process.ExitCode != 0)
-                        {
-                            string error = process.StandardError.ReadToEnd();
-                            if (!string.IsNullOrEmpty(error))
-                                throw new Exception(error);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Ошибка выполнения: {ex.Message}");
-            }
-        }
-
-        private void RunCmdVisible(string command)
-        {
-            try
-            {
-                var startInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = "/k " + command,
-                    UseShellExecute = true,
-                    CreateNoWindow = false,
-                    Verb = "runas"
-                };
-
-                System.Diagnostics.Process.Start(startInfo);
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Ошибка: {ex.Message}");
-            }
-        }
-
         // ============================================================
-        // 1. ВЫЙТИ ИЗ ПОЛЬЗОВАТЕЛЯ
-        // ============================================================
-        private void LogOff()
-        {
-            if (MessageBox.Show("Завершить сеанс текущего пользователя?", "Подтверждение",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-            {
-                RunCmd("shutdown /l");
-            }
-        }
-
-        // ============================================================
-        // 2. ВОЙТИ В WINRE
-        // ============================================================
-        private void EnterWinRE()
-        {
-            if (MessageBox.Show("Перезагрузить компьютер в среду восстановления?", "Подтверждение",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-            {
-                RunCmd("shutdown /r /o /t 0");
-            }
-        }
-
-        // ============================================================
-        // 3. ВЫПОЛНИТЬ
-        // ============================================================
-        private void RunDialog()
-        {
-            RunCmd("explorer.exe shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}");
-        }
-
-        // ============================================================
-        // 4. ВЕРНУТЬ РУССКИЙ ЯЗЫК
-        // ============================================================
-        private void RestoreRussianKeyboard()
-        {
-            RunCmd("reg add \"HKCU\\Control Panel\\International\\User Profile\" /v \"KeyboardLayout\" /t REG_SZ /d \"00000409,00000419\" /f");
-            MessageBox.Show("Русская раскладка добавлена. Выйдите из системы и зайдите обратно.",
-                "Информация", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        // ============================================================
-        // 5. ПОЧИНИТЬ ШРИФТЫ
-        // ============================================================
-        private void RestoreFonts()
-        {
-            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts\" /v \"Segoe UI (TrueType)\" /t REG_SZ /d \"segoeui.ttf\" /f");
-            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts\" /v \"Segoe UI Bold (TrueType)\" /t REG_SZ /d \"segoeuib.ttf\" /f");
-            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts\" /v \"Segoe UI Italic (TrueType)\" /t REG_SZ /d \"segoeuii.ttf\" /f");
-            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts\" /v \"Segoe UI Bold Italic (TrueType)\" /t REG_SZ /d \"segoeuiz.ttf\" /f");
-            MessageBox.Show("Шрифты восстановлены. Требуется перезагрузка.",
-                "Информация", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        // ============================================================
-        // 6. ВЕРНУТЬ СТАНДАРТНУЮ ТЕМУ
-        // ============================================================
-        private void RestoreDefaultTheme()
-        {
-            RunCmd("reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\" /v \"CurrentTheme\" /t REG_SZ /d \"C:\\Windows\\resources\\Themes\\aero.theme\" /f");
-            RunCmd("reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\" /v \"ThemeChangesDesktopIcons\" /t REG_DWORD /d 1 /f");
-            RunCmd("reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\" /v \"ThemeChangesMousePointers\" /t REG_DWORD /d 1 /f");
-            RunCmd("reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\" /v \"ThemeChangesSounds\" /t REG_DWORD /d 1 /f");
-            MessageBox.Show("Стандартная тема восстановлена.",
-                "Информация", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        // ============================================================
-        // 7. ВКЛЮЧИТЬ UAC
-        // ============================================================
-        private void EnableUAC()
-        {
-            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\" /v \"EnableLUA\" /t REG_DWORD /d 1 /f");
-            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\" /v \"ConsentPromptBehaviorAdmin\" /t REG_DWORD /d 5 /f");
-            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\" /v \"PromptOnSecureDesktop\" /t REG_DWORD /d 1 /f");
-            MessageBox.Show("UAC включен. Требуется перезагрузка.",
-                "Информация", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        // ============================================================
-        // 8. SFC /SCANNOW
-        // ============================================================
-        private void RunSfcScannow()
-        {
-            string command;
-            if (isWinRE)
-                command = "sfc /scannow /offbootdir=C:\\ /offwindir=C:\\Windows";
-            else
-                command = "sfc /scannow";
-
-            RunCmdVisible(command);
-        }
-
-        // ============================================================
-        // 9. ЗАМЕНИТЬ SETHC И UTILMAN (ИСПРАВЛЕННЫЙ ВАРИАНТ)
+        // sethc / utilman
         // ============================================================
         private void ReplaceSethcUtilman()
         {
             try
             {
-                // === ГЛАВНАЯ ПРОВЕРКА: РАБОТАЕТ ТОЛЬКО В WinRE ===
                 if (!isWinRE)
-                {
-                    throw new Exception("Эта функция может работать ТОЛЬКО в среде восстановления WinRE!\n" +
-                        "Пожалуйста, перезагрузите компьютер и загрузитесь с флешки (или нажмите 'Войти в WinRE').");
-                }
+                    throw new Exception("Эта функция работает только в WinRE.");
 
                 if (!IsAdministrator())
-                {
-                    throw new Exception("Для замены файлов требуются права администратора!\nПерезапустите программу от имени администратора.");
-                }
+                    throw new Exception("Нужны права администратора.");
 
-                // === АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ДИСКА С СИСТЕМОЙ В WinRE ===
-                // В WinRE путь к папке Windows чаще всего D:\Windows, E:\Windows и т.д.
-                // Мы найдем его, перебрав все доступные буквы.
                 string windowsPath = FindWindowsDirectoryInWinRE();
-
                 if (string.IsNullOrEmpty(windowsPath))
-                {
-                    throw new Exception("Не удалось автоматически найти папку Windows на вашем диске. Попробуйте указать букву диска вручную.");
-                }
+                    throw new Exception("Не удалось найти Windows.");
 
                 string system32 = Path.Combine(windowsPath, "System32");
-
                 string exePath = Application.ExecutablePath;
 
                 string sethcPath = Path.Combine(system32, "sethc.exe");
@@ -376,78 +206,38 @@ namespace BunnyBlack.Forms
                 string tempSethc = Path.Combine(Path.GetTempPath(), "sethc_temp.exe");
                 string tempUtilman = Path.Combine(Path.GetTempPath(), "utilman_temp.exe");
 
-                // Копируем нашу программу во временные файлы
                 File.Copy(exePath, tempSethc, true);
                 File.Copy(exePath, tempUtilman, true);
 
-                // СОЗДАЁМ BAT-ФАЙЛ (В нём уже нет жестких путей к C:\, используются переменные)
                 string batPath = Path.Combine(Path.GetTempPath(), "replace_sethc.bat");
                 File.WriteAllText(batPath, $@"
 @echo off
 title Замена sethc.exe и utilman.exe
-echo ========================================
-echo   Замена sethc.exe и utilman.exe
-echo ========================================
-echo.
-
-echo [1] Остановка защиты файлов...
 takeown /f ""{sethcPath}"" >nul 2>&1
 icacls ""{sethcPath}"" /grant Administrators:F >nul 2>&1
 takeown /f ""{utilmanPath}"" >nul 2>&1
 icacls ""{utilmanPath}"" /grant Administrators:F >nul 2>&1
-
-echo [2] Снятие атрибутов...
 attrib -r -s -h ""{sethcPath}"" >nul 2>&1
 attrib -r -s -h ""{utilmanPath}"" >nul 2>&1
-
-echo [3] Сохранение оригиналов...
 if not exist ""{sethcBak}"" copy ""{sethcPath}"" ""{sethcBak}""
 if not exist ""{utilmanBak}"" copy ""{utilmanPath}"" ""{utilmanBak}""
-
-echo [4] Замена файлов...
 copy ""{tempSethc}"" ""{sethcPath}"" /y
 copy ""{tempUtilman}"" ""{utilmanPath}"" /y
-
-echo.
-echo ========================================
-echo   ✅ Замена выполнена успешно!
-echo   Теперь при 5 Shift или Win+U запускается Bunny Black
-echo ========================================
-echo.
-pause
+timeout /t 2 /nobreak >nul
 ");
 
-                // ЗАПУСКАЕМ BAT-ФАЙЛ
-                var startInfo = new System.Diagnostics.ProcessStartInfo
+                var si = new ProcessStartInfo
                 {
                     FileName = batPath,
                     UseShellExecute = true,
-                    CreateNoWindow = false,
-                    Verb = "runas"
+                    CreateNoWindow = false
                 };
+                var p = Process.Start(si);
+                p?.WaitForExit();
 
-                var process = System.Diagnostics.Process.Start(startInfo);
-                if (process != null)
-                {
-                    process.WaitForExit();
-                }
-
-                try { File.Delete(batPath); } catch { }
-                try { File.Delete(tempSethc); } catch { }
-                try { File.Delete(tempUtilman); } catch { }
-
-                MessageBox.Show("✅ Замена выполнена успешно!\n\n" +
-                    "Теперь при нажатии 5 раз Shift (sethc) или Win+U (utilman)\n" +
-                    "будет запускаться Bunny Black.\n\n" +
-                    "Оригиналы сохранены как:\n" +
-                    $"• {sethcBak}\n" +
-                    $"• {utilmanBak}\n\n" +
-                    "⚠️ ВНИМАНИЕ! Чтобы восстановить оригиналы:\n" +
-                    "1. Откройте командную строку от имени администратора\n" +
-                    "2. Перейдите в папку System32 и выполните:\n" +
-                    "   copy sethc.exe.bak sethc.exe\n" +
-                    "   copy utilman.exe.bak utilman.exe",
-                    "Успешно", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                SecureDelete(batPath);
+                SecureDelete(tempSethc);
+                SecureDelete(tempUtilman);
             }
             catch (Exception ex)
             {
@@ -455,37 +245,239 @@ pause
             }
         }
 
-        // ============================================================
-        // ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: Поиск диска с Windows в среде WinRE
-        // ============================================================
-        private string FindWindowsDirectoryInWinRE()
+        private void SecureDelete(string path)
         {
-            // В WinRE проверяем все логические диски
-            string[] drives = Directory.GetLogicalDrives();
-            foreach (string drive in drives)
+            try
             {
+                if (!File.Exists(path)) return;
+                long len = new FileInfo(path).Length;
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
+                {
+                    var zeros = new byte[Math.Min(len > 0 ? len : 1, 65536)];
+                    long written = 0;
+                    while (written < len)
+                    {
+                        int chunk = (int)Math.Min(zeros.Length, len - written);
+                        fs.Write(zeros, 0, chunk);
+                        written += chunk;
+                    }
+                    fs.Flush(true);
+                }
+                File.Delete(path);
+            }
+            catch { }
+        }
+
+        // ============================================================
+        // SFC
+        // ============================================================
+        private void RunSfcScannow()
+        {
+            string command;
+            if (isWinRE)
+            {
+                string drive = DetectWindowsDrive();
+                if (string.IsNullOrEmpty(drive))
+                {
+                    NedoMessageBox.Show("Не удалось найти диск с Windows.", isError: true);
+                    return;
+                }
+                if (!drive.EndsWith(":")) drive += ":";
+                string winDir = drive + @"\Windows";
+                string winSxsTemp = Path.Combine(winDir, @"WinSxS\Temp");
+
                 try
                 {
-                    string testPath = Path.Combine(drive, "Windows", "System32");
-                    if (Directory.Exists(testPath))
-                    {
-                        return Path.Combine(drive, "Windows");
-                    }
+                    Directory.CreateDirectory(Path.Combine(winSxsTemp, "PendingDeletes"));
+                    Directory.CreateDirectory(Path.Combine(winSxsTemp, "PendingRenames"));
                 }
-                catch { /* Игнорируем ошибки доступа к дискам, пробуем следующий */ }
+                catch { }
+
+                string pendingXml = Path.Combine(winDir, @"WinSxS\pending.xml");
+                if (File.Exists(pendingXml))
+                {
+                    try
+                    {
+                        string bak = pendingXml + ".old";
+                        if (File.Exists(bak)) File.Delete(bak);
+                        File.Move(pendingXml, bak);
+                    }
+                    catch { }
+                }
+
+                command = $"sfc /scannow /offbootdir={drive}\\ /offwindir={winDir}";
             }
-            return null; // Не найдено
+            else command = "sfc /scannow";
+
+            RunCmdVisible(command);
+        }
+
+        // ============================================================
+        // UAC / WinRE
+        // ============================================================
+        private void EnableUAC()
+        {
+            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\" /v \"EnableLUA\" /t REG_DWORD /d 1 /f");
+            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\" /v \"ConsentPromptBehaviorAdmin\" /t REG_DWORD /d 5 /f");
+            RunCmd("reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\" /v \"PromptOnSecureDesktop\" /t REG_DWORD /d 1 /f");
+            NedoMessageBox.Show("UAC включён. Требуется перезагрузка.");
+        }
+
+        private void EnterWinRE()
+        {
+            if (MessageBoxHelper.Show(
+                "Перезагрузить в среду восстановления (WinRE)?",
+                "WinRE", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            RunCmd("shutdown /r /o /t 0");
+        }
+
+        // ============================================================
+        // ХЕЛПЕРЫ
+        // ============================================================
+        private void RunCmd(string command)
+        {
+            try
+            {
+                var si = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/c " + command,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var p = Process.Start(si)) p?.WaitForExit();
+            }
+            catch { }
+        }
+
+        private void RunCmdVisible(string command)
+        {
+            try
+            {
+                var si = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/k " + command,
+                    UseShellExecute = true,
+                    CreateNoWindow = false,
+                    WindowStyle = ProcessWindowStyle.Normal
+                };
+
+                var p = Process.Start(si);
+
+                if (p != null)
+                {
+                    var timer = new Timer { Interval = 300 };
+                    timer.Tick += (s, e) =>
+                    {
+                        timer.Stop();
+                        timer.Dispose();
+                        try
+                        {
+                            p.Refresh();
+                            IntPtr h = p.MainWindowHandle;
+                            if (h != IntPtr.Zero)
+                            {
+                                ShowWindow(h, 9);
+                                SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW);
+                                SetForegroundWindow(h);
+                            }
+                        }
+                        catch { }
+                    };
+                    timer.Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                NedoMessageBox.Show("Ошибка запуска: " + ex.Message, isError: true);
+            }
+        }
+
+        private string DetectWindowsDrive()
+        {
+            try
+            {
+                foreach (var d in DriveInfo.GetDrives())
+                {
+                    try
+                    {
+                        if (d.DriveType != DriveType.Fixed && d.DriveType != DriveType.Removable) continue;
+                        if (!d.IsReady) continue;
+                        if (d.Name.StartsWith("X:", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        string root = d.RootDirectory.FullName.TrimEnd('\\');
+                        if (!File.Exists(Path.Combine(root, @"Windows\System32\sfc.exe"))) continue;
+                        if (!Directory.Exists(Path.Combine(root, "Windows", "WinSxS"))) continue;
+
+                        return root;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            try
+            {
+                string fb = RegistryHelper.GetSystemDrive();
+                if (!string.IsNullOrEmpty(fb))
+                {
+                    if (!fb.EndsWith(":")) fb += ":";
+                    return fb;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private string FindWindowsDirectoryInWinRE()
+        {
+            string detected = DetectWindowsDrive();
+            if (!string.IsNullOrEmpty(detected))
+            {
+                string win = Path.Combine(detected, "Windows");
+                if (Directory.Exists(win)) return win;
+            }
+
+            try
+            {
+                foreach (var d in DriveInfo.GetDrives())
+                {
+                    try
+                    {
+                        if (!d.IsReady) continue;
+                        if (d.Name.StartsWith("X:", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (d.DriveType != DriveType.Fixed && d.DriveType != DriveType.Removable) continue;
+                        string testPath = Path.Combine(d.RootDirectory.FullName, "Windows", "System32");
+                        if (Directory.Exists(testPath)) return Path.Combine(d.RootDirectory.FullName, "Windows");
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            return null;
         }
 
         private bool IsAdministrator()
         {
             try
             {
-                var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-                var principal = new System.Security.Principal.WindowsPrincipal(identity);
-                return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+                var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+                var pr = new System.Security.Principal.WindowsPrincipal(id);
+                return pr.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
             }
             catch { return false; }
+        }
+
+        private Form FindOwner()
+        {
+            foreach (Form f in Application.OpenForms)
+                if (f is MainForm) return f;
+            return Form.ActiveForm;
         }
     }
 }

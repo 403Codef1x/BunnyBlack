@@ -13,6 +13,12 @@
     <Compile Update="Forms\CleanerForm.cs">
       <SubType>UserControl</SubType>
     </Compile>
+    <Compile Update="Forms\ClickerForm.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\FileManagerForm.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
     <Compile Update="Forms\RegistryEditorForm.cs">
       <SubType>UserControl</SubType>
     </Compile>
@@ -20,6 +26,9 @@
       <SubType>UserControl</SubType>
     </Compile>
     <Compile Update="Forms\SettingsForm.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\ShutdownForm.cs">
       <SubType>UserControl</SubType>
     </Compile>
     <Compile Update="Forms\TaskManagerForm.cs">

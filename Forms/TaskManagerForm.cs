@@ -1,7 +1,14 @@
-﻿using System;
+﻿// language: C#, file: Forms/TaskManagerForm.cs
+// Полная замена. Отображение как в Process Explorer / RKit:
+//   дерево процессов с отступами ├─/└─, колонки Name, PID, Critical,
+//   Company Name, CommandLine.
+// Контекстное меню: Kill, Freeze, Critical, Location, Properties.
+using System;
 using System.Collections.Generic;
-using System.Drawing;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
+using System.IO;
 using System.ServiceProcess;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -12,7 +19,7 @@ namespace BunnyBlack.Forms
 {
     public partial class TaskManagerForm : UserControl
     {
-        private DataGridView taskGrid;
+        private DataGridView grid;
         private CheckBox autoRefresh;
         private ComboBox refreshCombo;
         private Label statsLabel;
@@ -24,29 +31,22 @@ namespace BunnyBlack.Forms
         private int savedFirstDisplayedRow = 0;
         private int savedSelectedRowIndex = -1;
 
-        private PerformanceCounter cpuCounter;
-        private PerformanceCounter ramCounter;
-
-        private ServiceController serviceController = new ServiceController();
-        private DataGridView servicesGrid;
-        private TabControl taskTabControl;
-
         private List<ProcessInfo> cachedProcesses = new List<ProcessInfo>();
+
+        private readonly HashSet<string> criticalKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "system", "smss", "csrss", "wininit", "services", "lsass", "lsm",
+            "winlogon", "registry", "memory compression", "system idle process"
+        };
+
+        // Кэш Company Name для путей
+        private readonly Dictionary<string, string> companyCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         public TaskManagerForm(bool winRE)
         {
             isWinRE = winRE;
             this.BackColor = Color.FromArgb(13, 13, 13);
             this.ForeColor = Color.FromArgb(216, 216, 216);
-
-            try
-            {
-                cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
-                ramCounter = new PerformanceCounter("Memory", "Available MBytes");
-                cpuCounter.NextValue();
-                ramCounter.NextValue();
-            }
-            catch { }
 
             InitializeComponent();
             LoadTasksAsync();
@@ -62,70 +62,62 @@ namespace BunnyBlack.Forms
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 5,
-                Padding = new Padding(28, 24, 28, 20),
+                RowCount = 3,
+                Padding = new Padding(20, 18, 20, 16),
                 BackColor = Color.FromArgb(13, 13, 13)
             };
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            var title = new Label
-            {
-                Text = "Диспетчер задач",
-                Font = new Font("Segoe UI", 18, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240),
-                Dock = DockStyle.Fill,
-                BackColor = Color.Transparent
-            };
-            layout.Controls.Add(title, 0, 0);
 
             var ctrlPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.LeftToRight,
                 BackColor = Color.Transparent,
-                Height = 30
+                WrapContents = false
             };
 
             autoRefresh = new CheckBox
             {
                 Text = "Авто-обновление:",
                 ForeColor = Color.FromArgb(216, 216, 216),
-                Font = new Font("Segoe UI", 11),
+                Font = new Font("Segoe UI", 10),
                 AutoSize = true,
                 BackColor = Color.Transparent,
-                Checked = true
+                Checked = true,
+                Margin = new Padding(0, 6, 6, 0)
             };
             autoRefresh.CheckedChanged += (s, e) => ToggleAutoRefresh();
             ctrlPanel.Controls.Add(autoRefresh);
 
             refreshCombo = new ComboBox
             {
-                Items = { "2 сек", "5 сек", "10 сек", "30 сек" },
-                SelectedIndex = 1,
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Width = 75,
                 BackColor = Color.FromArgb(24, 24, 24),
                 ForeColor = Color.FromArgb(216, 216, 216),
-                FlatStyle = FlatStyle.Flat
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9),
+                Margin = new Padding(0, 4, 16, 0)
             };
+            refreshCombo.Items.AddRange(new object[] { "2 сек", "5 сек", "10 сек", "30 сек" });
+            refreshCombo.SelectedIndex = 1;
             refreshCombo.SelectedIndexChanged += (s, e) => UpdateTimer();
             ctrlPanel.Controls.Add(refreshCombo);
 
             statsLabel = new Label
             {
                 Text = "Загрузка...",
-                ForeColor = Color.FromArgb(102, 102, 102),
-                Font = new Font("Segoe UI", 11),
+                ForeColor = Color.FromArgb(140, 140, 140),
+                Font = new Font("Segoe UI", 10),
                 AutoSize = true,
-                Margin = new Padding(20, 0, 0, 0),
-                BackColor = Color.Transparent
+                BackColor = Color.Transparent,
+                Margin = new Padding(0, 6, 0, 0)
             };
             ctrlPanel.Controls.Add(statsLabel);
 
-            layout.Controls.Add(ctrlPanel, 0, 1);
+            layout.Controls.Add(ctrlPanel, 0, 0);
 
             searchBox = new TextBox
             {
@@ -133,154 +125,94 @@ namespace BunnyBlack.Forms
                 BackColor = Color.FromArgb(24, 24, 24),
                 ForeColor = Color.FromArgb(216, 216, 216),
                 BorderStyle = BorderStyle.FixedSingle,
-                Font = new Font("Segoe UI", 11)
+                Font = new Font("Segoe UI", 10),
+                Text = "Поиск по имени процесса..."
             };
-            searchBox.Text = "Поиск по имени процесса...";
             searchBox.ForeColor = Color.Gray;
             searchBox.GotFocus += (s, e) => { if (searchBox.Text == "Поиск по имени процесса...") { searchBox.Text = ""; searchBox.ForeColor = Color.FromArgb(216, 216, 216); } };
             searchBox.LostFocus += (s, e) => { if (string.IsNullOrEmpty(searchBox.Text)) { searchBox.Text = "Поиск по имени процесса..."; searchBox.ForeColor = Color.Gray; } };
-            searchBox.TextChanged += (s, e) => FilterTasks();
-            layout.Controls.Add(searchBox, 0, 2);
+            searchBox.TextChanged += (s, e) => FilterTree();
+            layout.Controls.Add(searchBox, 0, 1);
 
-            taskTabControl = new TabControl
+            grid = new DataGridView
             {
                 Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(13, 13, 13),
-                ForeColor = Color.FromArgb(216, 216, 216)
+                ForeColor = Color.FromArgb(216, 216, 216),
+                BackgroundColor = Color.FromArgb(13, 13, 13),
+                GridColor = Color.FromArgb(40, 40, 40),
+                BorderStyle = BorderStyle.None,
+                RowHeadersVisible = false,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                ReadOnly = true,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                EnableHeadersVisualStyles = false,
+                ColumnHeadersHeight = 34,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
+                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
+                RowHeadersBorderStyle = DataGridViewHeaderBorderStyle.None,
+                ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None
             };
+            grid.RowTemplate.Height = 26;
 
-            taskGrid = CreateProcessGrid();
-            var procTab = new TabPage("Процессы");
-            procTab.BackColor = Color.FromArgb(13, 13, 13);
-            procTab.ForeColor = Color.FromArgb(216, 216, 216);
-            procTab.Controls.Add(taskGrid);
-            taskTabControl.TabPages.Add(procTab);
+            typeof(DataGridView).InvokeMember("DoubleBuffered",
+                System.Reflection.BindingFlags.SetProperty |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic,
+                null, grid, new object[] { true });
 
-            servicesGrid = CreateServicesGrid();
-            var svcTab = new TabPage("Службы");
-            svcTab.BackColor = Color.FromArgb(13, 13, 13);
-            svcTab.ForeColor = Color.FromArgb(216, 216, 216);
-            svcTab.Controls.Add(servicesGrid);
-            taskTabControl.TabPages.Add(svcTab);
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(25, 25, 25);
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(200, 200, 200);
+            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9, FontStyle.Bold);
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Color.FromArgb(25, 25, 25);
 
-            layout.Controls.Add(taskTabControl, 0, 3);
+            grid.DefaultCellStyle.BackColor = Color.FromArgb(13, 13, 13);
+            grid.DefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
+            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(40, 50, 60);
+            grid.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 255, 255);
+            grid.DefaultCellStyle.Font = new Font("Consolas", 9);
+
+            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(16, 16, 16);
+            grid.AlternatingRowsDefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
+
+            grid.Columns.Add("Name", "Process Name");
+            grid.Columns.Add("PID", "PID");
+            grid.Columns.Add("Critical", "Critical");
+            grid.Columns.Add("Company", "Company Name");
+            grid.Columns.Add("CommandLine", "CommandLine");
+
+            grid.Columns[0].Width = 300;
+            grid.Columns[1].Width = 70;
+            grid.Columns[2].Width = 80;
+            grid.Columns[3].Width = 200;
+            grid.Columns[4].Width = 640;
+
+            grid.Columns[1].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            grid.Columns[2].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+
+            grid.Columns[0].SortMode = DataGridViewColumnSortMode.NotSortable;
+            grid.Columns[1].SortMode = DataGridViewColumnSortMode.NotSortable;
+            grid.Columns[2].SortMode = DataGridViewColumnSortMode.NotSortable;
+            grid.Columns[3].SortMode = DataGridViewColumnSortMode.NotSortable;
+            grid.Columns[4].SortMode = DataGridViewColumnSortMode.NotSortable;
+
+            grid.ContextMenuStrip = CreateContextMenu();
+            layout.Controls.Add(grid, 0, 2);
 
             this.Controls.Add(layout);
 
             ToggleAutoRefresh();
-            LoadServices();
-        }
-
-        private DataGridView CreateProcessGrid()
-        {
-            var grid = new DataGridView
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(22, 22, 22),
-                ForeColor = Color.FromArgb(216, 216, 216),
-                BackgroundColor = Color.FromArgb(22, 22, 22),
-                GridColor = Color.FromArgb(45, 45, 45),
-                BorderStyle = BorderStyle.None,
-                RowHeadersVisible = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
-                ReadOnly = true,
-                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                EnableHeadersVisualStyles = false,
-                ColumnHeadersHeight = 30,
-                RowTemplate = { Height = 25 }
-            };
-
-            typeof(DataGridView).InvokeMember("DoubleBuffered",
-                System.Reflection.BindingFlags.SetProperty |
-                System.Reflection.BindingFlags.Instance |
-                System.Reflection.BindingFlags.NonPublic,
-                null, grid, new object[] { true });
-
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(30, 30, 30);
-            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(200, 200, 200);
-            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9, FontStyle.Bold);
-
-            grid.DefaultCellStyle.BackColor = Color.FromArgb(22, 22, 22);
-            grid.DefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(40, 50, 60);
-            grid.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 255, 255);
-            grid.DefaultCellStyle.Font = new Font("Segoe UI", 9);
-
-            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(17, 17, 17);
-            grid.AlternatingRowsDefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
-
-            grid.Columns.Add("PID", "PID");
-            grid.Columns.Add("Name", "Процесс");
-            grid.Columns.Add("Memory", "Память МБ");
-            grid.Columns.Add("CPU", "CPU %");
-            grid.Columns.Add("Status", "Статус");
-            grid.Columns.Add("Critical", "Критичность");
-            grid.Columns[0].Width = 55;
-            grid.Columns[2].Width = 85;
-            grid.Columns[3].Width = 65;
-            grid.Columns[4].Width = 85;
-            grid.Columns[5].Width = 110;
-
-            grid.ContextMenuStrip = CreateContextMenu();
-            return grid;
-        }
-
-        private DataGridView CreateServicesGrid()
-        {
-            var grid = new DataGridView
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(22, 22, 22),
-                ForeColor = Color.FromArgb(216, 216, 216),
-                BackgroundColor = Color.FromArgb(22, 22, 22),
-                GridColor = Color.FromArgb(45, 45, 45),
-                BorderStyle = BorderStyle.None,
-                RowHeadersVisible = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
-                ReadOnly = true,
-                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                EnableHeadersVisualStyles = false,
-                ColumnHeadersHeight = 30,
-                RowTemplate = { Height = 25 }
-            };
-
-            typeof(DataGridView).InvokeMember("DoubleBuffered",
-                System.Reflection.BindingFlags.SetProperty |
-                System.Reflection.BindingFlags.Instance |
-                System.Reflection.BindingFlags.NonPublic,
-                null, grid, new object[] { true });
-
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(30, 30, 30);
-            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(200, 200, 200);
-            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9, FontStyle.Bold);
-
-            grid.DefaultCellStyle.BackColor = Color.FromArgb(22, 22, 22);
-            grid.DefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(40, 50, 60);
-            grid.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 255, 255);
-            grid.DefaultCellStyle.Font = new Font("Segoe UI", 9);
-
-            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(17, 17, 17);
-            grid.AlternatingRowsDefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
-
-            grid.Columns.Add("Name", "Имя");
-            grid.Columns.Add("Display", "Отображаемое имя");
-            grid.Columns.Add("Status", "Статус");
-            grid.Columns.Add("Start", "Тип запуска");
-
-            grid.ContextMenuStrip = CreateServiceContextMenu();
-            return grid;
         }
 
         private ContextMenuStrip CreateContextMenu()
         {
-            var menu = new ContextMenuStrip();
-            menu.BackColor = Color.FromArgb(17, 17, 17);
-            menu.ForeColor = Color.FromArgb(216, 216, 216);
+            var menu = new ContextMenuStrip
+            {
+                BackColor = Color.FromArgb(17, 17, 17),
+                ForeColor = Color.FromArgb(216, 216, 216)
+            };
 
             var killItem = new ToolStripMenuItem("Завершить (Delete)");
             killItem.Click += (s, e) => KillSelected();
@@ -317,33 +249,9 @@ namespace BunnyBlack.Forms
             return menu;
         }
 
-        private ContextMenuStrip CreateServiceContextMenu()
-        {
-            var menu = new ContextMenuStrip();
-            menu.BackColor = Color.FromArgb(17, 17, 17);
-            menu.ForeColor = Color.FromArgb(216, 216, 216);
-
-            var startItem = new ToolStripMenuItem("Запустить");
-            startItem.Click += (s, e) => StartSelectedService();
-            menu.Items.Add(startItem);
-
-            var stopItem = new ToolStripMenuItem("Остановить");
-            stopItem.Click += (s, e) => StopSelectedService();
-            menu.Items.Add(stopItem);
-
-            menu.Items.Add(new ToolStripSeparator());
-
-            var deleteItem = new ToolStripMenuItem("Удалить");
-            deleteItem.ForeColor = Color.FromArgb(255, 150, 150);
-            deleteItem.Click += (s, e) => DeleteSelectedService();
-            menu.Items.Add(deleteItem);
-
-            return menu;
-        }
-
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
-            if (taskGrid.SelectedRows.Count == 0) return;
+            if (grid.SelectedRows.Count == 0) return;
 
             switch (e.KeyCode)
             {
@@ -355,10 +263,8 @@ namespace BunnyBlack.Forms
                     int pid = GetSelectedPID();
                     if (pid >= 0)
                     {
-                        if (frozenPids.Contains(pid))
-                            UnfreezeSelected();
-                        else
-                            FreezeSelected();
+                        if (frozenPids.Contains(pid)) UnfreezeSelected();
+                        else FreezeSelected();
                         e.Handled = true;
                     }
                     break;
@@ -367,17 +273,24 @@ namespace BunnyBlack.Forms
 
         private int GetSelectedPID()
         {
-            if (taskGrid.SelectedRows.Count == 0) return -1;
-            var val = taskGrid.SelectedRows[0].Cells[0].Value;
-            return val != null ? int.Parse(val.ToString()) : -1;
+            if (grid.SelectedRows.Count == 0) return -1;
+            var val = grid.SelectedRows[0].Cells[1].Value;
+            if (val == null) return -1;
+            return int.TryParse(val.ToString(), out int p) ? p : -1;
         }
 
         private string GetSelectedName()
         {
-            if (taskGrid.SelectedRows.Count == 0) return "";
-            return taskGrid.SelectedRows[0].Cells[1].Value?.ToString() ?? "";
+            if (grid.SelectedRows.Count == 0) return "";
+            string raw = grid.SelectedRows[0].Cells[0].Value?.ToString() ?? "";
+            // снять префикс дерева
+            raw = raw.TrimStart(' ', '│', '├', '└', '─', ' ').Trim();
+            return raw;
         }
 
+        // ============================================================
+        // ЗАГРУЗКА
+        // ============================================================
         private async void LoadTasksAsync()
         {
             if (isLoading) return;
@@ -385,197 +298,280 @@ namespace BunnyBlack.Forms
 
             try
             {
-                if (taskGrid.FirstDisplayedScrollingRowIndex >= 0)
+                try
                 {
-                    savedFirstDisplayedRow = taskGrid.FirstDisplayedScrollingRowIndex;
+                    if (grid.FirstDisplayedScrollingRowIndex >= 0)
+                        savedFirstDisplayedRow = grid.FirstDisplayedScrollingRowIndex;
                 }
-
+                catch { }
                 savedSelectedRowIndex = -1;
-                if (taskGrid.SelectedRows.Count > 0)
-                {
-                    savedSelectedRowIndex = taskGrid.SelectedRows[0].Index;
-                }
+                if (grid.SelectedRows.Count > 0)
+                    savedSelectedRowIndex = grid.SelectedRows[0].Index;
 
                 var processes = await Task.Run(() => ProcessHelper.GetProcessesFast());
                 cachedProcesses = processes;
 
-                if (this.InvokeRequired)
+                // предзагрузка Company Name в фоне
+                await Task.Run(() =>
                 {
+                    foreach (var p in processes)
+                    {
+                        try
+                        {
+                            if (string.IsNullOrEmpty(p.Name)) continue;
+                            string path = GetProcessPath(p.PID);
+                            if (string.IsNullOrEmpty(path)) continue;
+                            if (companyCache.ContainsKey(path)) continue;
+                            var vi = FileVersionInfo.GetVersionInfo(path);
+                            companyCache[path] = vi.CompanyName ?? "";
+                        }
+                        catch { }
+                    }
+                });
+
+                if (this.InvokeRequired)
                     this.Invoke(new Action(() =>
                     {
-                        UpdateProcessGrid(processes);
-                        FilterTasks();
-
-                        if (savedFirstDisplayedRow > 0 && savedFirstDisplayedRow < taskGrid.Rows.Count)
-                        {
-                            taskGrid.FirstDisplayedScrollingRowIndex = savedFirstDisplayedRow;
-                        }
-
-                        if (savedSelectedRowIndex >= 0 && savedSelectedRowIndex < taskGrid.Rows.Count)
-                        {
-                            taskGrid.Rows[savedSelectedRowIndex].Selected = true;
-                        }
+                        RebuildTree(processes);
+                        FilterTree();
+                        RestoreScrollAndSelection();
                     }));
-                }
                 else
                 {
-                    UpdateProcessGrid(processes);
-                    FilterTasks();
-
-                    if (savedFirstDisplayedRow > 0 && savedFirstDisplayedRow < taskGrid.Rows.Count)
-                    {
-                        taskGrid.FirstDisplayedScrollingRowIndex = savedFirstDisplayedRow;
-                    }
-
-                    if (savedSelectedRowIndex >= 0 && savedSelectedRowIndex < taskGrid.Rows.Count)
-                    {
-                        taskGrid.Rows[savedSelectedRowIndex].Selected = true;
-                    }
+                    RebuildTree(processes);
+                    FilterTree();
+                    RestoreScrollAndSelection();
                 }
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Ошибка загрузки: {ex.Message}");
+                Debug.WriteLine($"[LoadTasks] {ex.Message}");
             }
-            finally
-            {
-                isLoading = false;
-            }
+            finally { isLoading = false; }
         }
 
-        private void UpdateProcessGrid(List<ProcessInfo> processes)
+        private void RestoreScrollAndSelection()
         {
-            taskGrid.Rows.Clear();
-
-            var criticalKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            try
             {
-                "csrss", "smss", "wininit", "services", "lsass", "lsm",
-                "winlogon", "system", "system idle process", "registry"
-            };
+                if (savedFirstDisplayedRow > 0 && savedFirstDisplayedRow < grid.Rows.Count)
+                    grid.FirstDisplayedScrollingRowIndex = savedFirstDisplayedRow;
 
-            foreach (var proc in processes)
-            {
-                try
-                {
-                    bool isFrz = frozenPids.Contains(proc.PID);
-
-                    bool isCritical = false;
-                    string nameLower = proc.Name.ToLower();
-                    foreach (var kw in criticalKeywords)
-                    {
-                        if (nameLower == kw || nameLower.Contains(kw))
-                        {
-                            isCritical = true;
-                            break;
-                        }
-                    }
-
-                    var row = new DataGridViewRow();
-                    row.CreateCells(taskGrid, proc.PID, proc.Name, proc.MemoryMB, 0, proc.Status);
-
-                    var critCell = new DataGridViewTextBoxCell();
-                    critCell.Value = isCritical ? "КРИТИЧНЫЙ" : "Обычный";
-
-                    if (isCritical)
-                    {
-                        critCell.Style.BackColor = Color.FromArgb(30, 15, 15);
-                        critCell.Style.ForeColor = Color.FromArgb(255, 80, 80);
-                        critCell.Style.Font = new Font("Segoe UI", 9, FontStyle.Bold);
-                        for (int i = 0; i < 5; i++)
-                        {
-                            row.Cells[i].Style.BackColor = Color.FromArgb(30, 15, 15);
-                            row.Cells[i].Style.ForeColor = Color.FromArgb(255, 170, 170);
-                        }
-                    }
-                    else
-                    {
-                        critCell.Style.BackColor = Color.FromArgb(15, 30, 20);
-                        critCell.Style.ForeColor = Color.FromArgb(153, 221, 187);
-                    }
-                    critCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
-                    row.Cells[5] = critCell;
-
-                    if (isFrz)
-                    {
-                        for (int i = 0; i < 5; i++)
-                        {
-                            row.Cells[i].Style.BackColor = Color.FromArgb(10, 26, 42);
-                            row.Cells[i].Style.ForeColor = Color.FromArgb(68, 136, 255);
-                        }
-                    }
-
-                    if (isCritical && isFrz)
-                    {
-                        for (int i = 0; i < 5; i++)
-                        {
-                            row.Cells[i].Style.BackColor = Color.FromArgb(30, 15, 15);
-                            row.Cells[i].Style.ForeColor = Color.FromArgb(255, 170, 170);
-                        }
-                    }
-
-                    taskGrid.Rows.Add(row);
-                }
-                catch { }
+                if (savedSelectedRowIndex >= 0 && savedSelectedRowIndex < grid.Rows.Count)
+                    grid.Rows[savedSelectedRowIndex].Selected = true;
             }
+            catch { }
+        }
+
+        // ============================================================
+        // ДЕРЕВО
+        // ============================================================
+        private void RebuildTree(List<ProcessInfo> processes)
+        {
+            grid.Rows.Clear();
+
+            // карта: ppid → список процессов
+            var childrenOf = new Dictionary<int, List<ProcessInfo>>();
+            var byPid = new Dictionary<int, ProcessInfo>();
+            var hasParent = new HashSet<int>();
+
+            foreach (var p in processes)
+            {
+                byPid[p.PID] = p;
+                if (!childrenOf.ContainsKey(p.ParentPID))
+                    childrenOf[p.ParentPID] = new List<ProcessInfo>();
+                childrenOf[p.ParentPID].Add(p);
+            }
+
+            foreach (var p in processes)
+                if (p.ParentPID != 0 && byPid.ContainsKey(p.ParentPID))
+                    hasParent.Add(p.PID);
+
+            // корни — процессы, чьи родители не в списке или ppid = 0 / 4 (System)
+            var roots = new List<ProcessInfo>();
+            foreach (var p in processes)
+                if (p.ParentPID == 0 || !hasParent.Contains(p.PID) || !byPid.ContainsKey(p.ParentPID))
+                    roots.Add(p);
+
+            // сортировка корней — System Idle первый, дальше System, потом остальные
+            roots.Sort((a, b) =>
+            {
+                int Rank(ProcessInfo p)
+                {
+                    string n = p.Name.ToLowerInvariant();
+                    if (n == "system idle process" || n == "idle") return 0;
+                    if (n == "system") return 1;
+                    if (n == "smss") return 2;
+                    if (n == "csrss") return 3;
+                    if (n == "wininit") return 4;
+                    if (n == "services") return 5;
+                    if (n == "lsass") return 6;
+                    if (n == "winlogon") return 7;
+                    if (n == "explorer") return 8;
+                    return 100;
+                }
+                int ra = Rank(a), rb = Rank(b);
+                if (ra != rb) return ra.CompareTo(rb);
+                return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
+
+            // обход рекурсивно
+            var visited = new HashSet<int>();
+            foreach (var root in roots)
+                AddProcessRow(root, "", true, childrenOf, byPid, visited);
+
+            // кто остался непосещённым (циклы?) — добавим в корень
+            foreach (var p in processes)
+                if (!visited.Contains(p.PID))
+                    AddProcessRow(p, "", true, childrenOf, byPid, visited);
 
             UpdateStats(processes);
         }
 
+        private void AddProcessRow(ProcessInfo p, string prefix, bool isLast,
+            Dictionary<int, List<ProcessInfo>> childrenOf,
+            Dictionary<int, ProcessInfo> byPid,
+            HashSet<int> visited)
+        {
+            if (visited.Contains(p.PID)) return;
+            visited.Add(p.PID);
+
+            // определяем критикал
+            string lower = p.Name.ToLowerInvariant();
+            bool isCritical = criticalKeywords.Contains(lower);
+
+            // company name
+            string company = "";
+            try
+            {
+                string path = GetProcessPath(p.PID);
+                if (!string.IsNullOrEmpty(path) && companyCache.TryGetValue(path, out var c))
+                    company = c;
+            }
+            catch { }
+            if (string.IsNullOrEmpty(company) && isCritical) company = "Microsoft Corporation";
+
+            // command line
+            string cmd = "";
+            try
+            {
+                string path = GetProcessPath(p.PID);
+                cmd = path ?? "";
+            }
+            catch { }
+
+            // имя с префиксом дерева
+            string display = prefix + p.Name;
+
+            int idx = grid.Rows.Add(display, p.PID, isCritical ? "Да" : "", company, cmd);
+            var row = grid.Rows[idx];
+            row.Tag = p;
+
+            // подсветка по типу
+            if (isCritical)
+            {
+                // как в Process Explorer — светло-красный фон для системных
+                row.Cells[0].Style.BackColor = Color.FromArgb(60, 20, 20);
+                row.Cells[1].Style.BackColor = Color.FromArgb(60, 20, 20);
+                row.Cells[2].Style.BackColor = Color.FromArgb(60, 20, 20);
+                row.Cells[3].Style.BackColor = Color.FromArgb(60, 20, 20);
+                row.Cells[4].Style.BackColor = Color.FromArgb(60, 20, 20);
+
+                row.Cells[0].Style.ForeColor = Color.FromArgb(255, 180, 180);
+                row.Cells[1].Style.ForeColor = Color.FromArgb(255, 180, 180);
+                row.Cells[2].Style.ForeColor = Color.FromArgb(255, 100, 100);
+                row.Cells[3].Style.ForeColor = Color.FromArgb(255, 180, 180);
+                row.Cells[4].Style.ForeColor = Color.FromArgb(255, 180, 180);
+
+                row.Cells[2].Style.Font = new Font("Consolas", 9, FontStyle.Bold);
+            }
+            else
+            {
+                row.Cells[0].Style.ForeColor = Color.FromArgb(216, 216, 216);
+                row.Cells[1].Style.ForeColor = Color.FromArgb(200, 200, 200);
+                row.Cells[2].Style.ForeColor = Color.FromArgb(120, 120, 120);
+                row.Cells[3].Style.ForeColor = Color.FromArgb(180, 180, 180);
+                row.Cells[4].Style.ForeColor = Color.FromArgb(180, 200, 180);
+            }
+
+            // frozen — синий
+            if (frozenPids.Contains(p.PID))
+            {
+                for (int c = 0; c < 5; c++)
+                {
+                    row.Cells[c].Style.BackColor = Color.FromArgb(10, 26, 42);
+                    row.Cells[c].Style.ForeColor = Color.FromArgb(100, 180, 255);
+                }
+            }
+
+            // дети
+            if (childrenOf.TryGetValue(p.PID, out var children))
+            {
+                // убираем дубли (себя)
+                children.RemoveAll(c => c.PID == p.PID);
+                children.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+
+                for (int i = 0; i < children.Count; i++)
+                {
+                    bool last = (i == children.Count - 1);
+                    string childPrefix = prefix.Replace("├─ ", "│  ").Replace("└─ ", "   ") +
+                                         (last ? "└─ " : "├─ ");
+                    AddProcessRow(children[i], childPrefix, last, childrenOf, byPid, visited);
+                }
+            }
+        }
+
+        // ============================================================
+        // Путь процесса
+        // ============================================================
+        private string GetProcessPath(int pid)
+        {
+            try
+            {
+                using (var p = Process.GetProcessById(pid))
+                {
+                    try { return p.MainModule?.FileName ?? ""; }
+                    catch { return ""; }
+                }
+            }
+            catch { return ""; }
+        }
+
+        // ============================================================
+        // СТАТИСТИКА
+        // ============================================================
         private void UpdateStats(List<ProcessInfo> processes)
         {
             int total = processes.Count;
             int crit = 0, frz = 0;
 
-            var criticalKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "csrss", "smss", "wininit", "services", "lsass", "lsm",
-                "winlogon", "system", "system idle process", "registry"
-            };
-
             foreach (var proc in processes)
             {
                 if (frozenPids.Contains(proc.PID)) frz++;
-
-                bool isCritical = false;
-                string nameLower = proc.Name.ToLower();
-                foreach (var kw in criticalKeywords)
-                {
-                    if (nameLower == kw || nameLower.Contains(kw))
-                    {
-                        isCritical = true;
-                        break;
-                    }
-                }
-                if (isCritical) crit++;
+                if (criticalKeywords.Contains(proc.Name.ToLowerInvariant())) crit++;
             }
 
-            try
-            {
-                float cpu = cpuCounter?.NextValue() ?? 0;
-                float ram = ramCounter?.NextValue() ?? 0;
-                statsLabel.Text = $"Процессов: {total}   Критичных: {crit}   Заморожено: {frz}   CPU: {cpu:F1}%   RAM: {ram:F0} MB";
-            }
-            catch
-            {
-                statsLabel.Text = $"Процессов: {total}   Критичных: {crit}   Заморожено: {frz}";
-            }
+            statsLabel.Text = $"Процессов: {total}   Критичных: {crit}   Заморожено: {frz}";
         }
 
-        private void FilterTasks()
+        // ============================================================
+        // ФИЛЬТР
+        // ============================================================
+        private void FilterTree()
         {
-            var text = searchBox.Text?.ToLower() ?? "";
+            string text = searchBox.Text?.ToLowerInvariant() ?? "";
             if (text == "поиск по имени процесса..." || string.IsNullOrEmpty(text))
             {
-                foreach (DataGridViewRow row in taskGrid.Rows)
-                    row.Visible = true;
+                foreach (DataGridViewRow row in grid.Rows) row.Visible = true;
                 return;
             }
 
-            foreach (DataGridViewRow row in taskGrid.Rows)
+            foreach (DataGridViewRow row in grid.Rows)
             {
-                if (row.Cells[1].Value == null) continue;
-                var name = row.Cells[1].Value.ToString().ToLower();
-                row.Visible = name.Contains(text);
+                string name = row.Cells[0].Value?.ToString() ?? "";
+                string cmd = row.Cells[4].Value?.ToString() ?? "";
+                row.Visible = name.ToLowerInvariant().Contains(text) ||
+                              cmd.ToLowerInvariant().Contains(text);
             }
         }
 
@@ -591,18 +587,13 @@ namespace BunnyBlack.Forms
                 refreshTimer.Interval = GetInterval();
                 refreshTimer.Start();
             }
-            else
-            {
-                refreshTimer?.Stop();
-            }
+            else refreshTimer?.Stop();
         }
 
         private void UpdateTimer()
         {
             if (refreshTimer != null && refreshTimer.Enabled)
-            {
                 refreshTimer.Interval = GetInterval();
-            }
         }
 
         private int GetInterval()
@@ -615,6 +606,9 @@ namespace BunnyBlack.Forms
             return 5000;
         }
 
+        // ============================================================
+        // ДЕЙСТВИЯ
+        // ============================================================
         private void KillSelected()
         {
             var pid = GetSelectedPID();
@@ -644,44 +638,21 @@ namespace BunnyBlack.Forms
         {
             var pid = GetSelectedPID();
             if (pid < 0) return;
-
             try
             {
-                var proc = Process.GetProcessById(pid);
-                var path = proc.MainModule?.FileName;
-                if (!string.IsNullOrEmpty(path))
-                {
-                    var folder = System.IO.Path.GetDirectoryName(path);
-                    if (System.IO.Directory.Exists(folder))
-                        Process.Start(folder);
-                }
+                string path = GetProcessPath(pid);
+                if (!string.IsNullOrEmpty(path) && File.Exists(path))
+                    Process.Start("explorer.exe", $"/select,\"{path}\"");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Ошибка: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         private void ShowProperties()
         {
-            var pid = GetSelectedPID();
-            if (pid < 0) return;
-
-            try
-            {
-                var proc = Process.GetProcessById(pid);
-                var path = proc.MainModule?.FileName;
-                if (!string.IsNullOrEmpty(path) && System.IO.File.Exists(path))
-                {
-                    Process.Start("explorer.exe", $"/select,\"{path}\"");
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Ошибка: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            OpenLocation();
         }
 
         private void FreezeSelected()
@@ -710,9 +681,6 @@ namespace BunnyBlack.Forms
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        // ============================================================
-        // УСТАНОВКА КРИТИЧНОСТИ
-        // ============================================================
         private void SetCriticalSelected(bool critical)
         {
             var pid = GetSelectedPID();
@@ -722,40 +690,46 @@ namespace BunnyBlack.Forms
             if (!ProcessHelper.IsAdministrator())
             {
                 MessageBox.Show(
-                    "Для изменения критичности процесса требуются права администратора!\n\n" +
-                    "Перезапустите программу от имени администратора.",
+                    "Для изменения критичности процесса требуются права администратора!",
                     "Требуются права", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            string warning = critical ?
-                "⚠️ ПРОЦЕСС СТАНЕТ КРИТИЧНЫМ ДЛЯ ВСЕЙ СИСТЕМЫ!\n" +
-                "ЕГО ЗАВЕРШЕНИЕ ВЫЗОВЕТ BSOD (синий экран смерти)!" :
-                "Критичность будет снята.";
+            bool wasCritical = false;
+            try { wasCritical = ProcessHelper.IsProcessCritical(pid); } catch { }
+            string currentState = wasCritical ? "СЕЙЧАС КРИТИЧНЫЙ" : "сейчас обычный";
+
+            string warning = critical
+                ? "⚠️ ПРОЦЕСС СТАНЕТ КРИТИЧНЫМ ДЛЯ ВСЕЙ СИСТЕМЫ!\n" +
+                  "ЕГО ЗАВЕРШЕНИЕ ВЫЗОВЕТ BSOD!"
+                : "Критичность будет снята.";
 
             if (pid == Process.GetCurrentProcess().Id)
-            {
                 warning += "\n\nВНИМАНИЕ: Вы изменяете критичность ТЕКУЩЕЙ ПРОГРАММЫ!";
-            }
 
             DialogResult confirm = MessageBox.Show(
-                $"{(critical ? "Установить" : "Снять")} критичность с '{name}' (PID: {pid})?\n\n" + warning,
-                "Подтверждение",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
+                $"{(critical ? "Установить" : "Снять")} критичность с '{name}' (PID: {pid})?\n" +
+                $"Текущий статус: {currentState}\n\n" + warning,
+                "Подтверждение", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
 
             if (confirm != DialogResult.Yes) return;
 
             try
             {
-                bool result = ProcessHelper.SetSystemCritical(pid, critical);
+                string detail;
+                var result = ProcessHelper.SetSystemCritical(pid, critical, out detail);
 
-                if (result)
+                if (result == ProcessOpResult.Success)
                 {
                     ProcessHelper.ClearCache();
                     LoadTasksAsync();
                     MessageBox.Show($"{(critical ? "Критичность установлена" : "Критичность снята")} для {name}",
                         "Успешно", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show($"Ошибка ({result}): {detail}", "Ошибка",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
@@ -765,148 +739,10 @@ namespace BunnyBlack.Forms
             }
         }
 
-        private void LoadServices()
-        {
-            if (servicesGrid == null) return;
-
-            servicesGrid.Rows.Clear();
-            try
-            {
-                foreach (var service in ServiceController.GetServices())
-                {
-                    try
-                    {
-                        servicesGrid.Rows.Add(
-                            service.ServiceName,
-                            service.DisplayName,
-                            service.Status.ToString(),
-                            GetServiceStartType(service.ServiceName)
-                        );
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-        }
-
-        private string GetServiceStartType(string name)
-        {
-            try
-            {
-                using (var key = Registry.LocalMachine.OpenSubKey($"SYSTEM\\CurrentControlSet\\Services\\{name}"))
-                {
-                    if (key != null)
-                    {
-                        var start = key.GetValue("Start") as int?;
-                        if (start.HasValue)
-                        {
-                            if (start.Value == 0) return "Загрузочная";
-                            if (start.Value == 1) return "Системная";
-                            if (start.Value == 2) return "Авто";
-                            if (start.Value == 3) return "Вручную";
-                            if (start.Value == 4) return "Отключена";
-                        }
-                    }
-                }
-            }
-            catch { }
-            return "Неизвестно";
-        }
-
-        private void StartSelectedService()
-        {
-            if (servicesGrid.SelectedRows.Count == 0) return;
-            var name = servicesGrid.SelectedRows[0].Cells[0].Value?.ToString() ?? "";
-            if (string.IsNullOrEmpty(name)) return;
-
-            try
-            {
-                serviceController.ServiceName = name;
-                serviceController.Start();
-                serviceController.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
-                LoadServices();
-                MessageBox.Show($"Служба {name} запущена", "Успешно",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Ошибка запуска службы: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void StopSelectedService()
-        {
-            if (servicesGrid.SelectedRows.Count == 0) return;
-            var name = servicesGrid.SelectedRows[0].Cells[0].Value?.ToString() ?? "";
-            if (string.IsNullOrEmpty(name)) return;
-
-            try
-            {
-                serviceController.ServiceName = name;
-                serviceController.Stop();
-                serviceController.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
-                LoadServices();
-                MessageBox.Show($"Служба {name} остановлена", "Успешно",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Ошибка остановки службы: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void DeleteSelectedService()
-        {
-            if (servicesGrid.SelectedRows.Count == 0) return;
-            var name = servicesGrid.SelectedRows[0].Cells[0].Value?.ToString() ?? "";
-            if (string.IsNullOrEmpty(name)) return;
-
-            if (MessageBox.Show($"Удалить службу '{name}'?", "Подтверждение",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-            {
-                try
-                {
-                    try
-                    {
-                        serviceController.ServiceName = name;
-                        serviceController.Stop();
-                        serviceController.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(10));
-                    }
-                    catch { }
-
-                    var startInfo = new ProcessStartInfo
-                    {
-                        FileName = "sc",
-                        Arguments = $"delete \"{name}\"",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardOutput = true
-                    };
-                    using (var process = Process.Start(startInfo))
-                    {
-                        process.WaitForExit();
-                    }
-
-                    LoadServices();
-                    MessageBox.Show($"Служба {name} удалена", "Успешно",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Ошибка удаления службы: {ex.Message}", "Ошибка",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
-
         public new void Dispose()
         {
             try
             {
-                cpuCounter?.Dispose();
-                ramCounter?.Dispose();
                 refreshTimer?.Stop();
                 refreshTimer?.Dispose();
                 ProcessHelper.ClearCache();

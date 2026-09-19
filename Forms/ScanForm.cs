@@ -1,4 +1,14 @@
-﻿using System;
+﻿// language: C#, file: Forms/ScanForm.cs
+// Полная замена.
+// ФИКС: в WinRE проверка/удаление политик идёт через оффлайн-кусты (HKLM + HKCU).
+// - HKCU в WinRE читаем из BunnyBlack_Offline_HKCU (NTUSER.DAT), fallback на SOFTWARE.
+// - HKLM в WinRE читаем из BunnyBlack_Offline_SOFTWARE.
+// - Дублируем проверки в machine-wide Policies (HKLM), которые выставляются через оффлайн.
+// - п.2  — handle guard в BeginAutoScan.
+// - п.6  — батч-обновление грида.
+// - п.16 — ProgressBar.
+// - п.20 — hosts через system drive.
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -7,6 +17,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using BunnyBlack.Core;
 
 namespace BunnyBlack.Forms
 {
@@ -17,19 +28,18 @@ namespace BunnyBlack.Forms
         private CheckBox autoFixCheck;
         private Button scanButton;
         private Button fixButton;
+        private ProgressBar scanProgress;
         private bool isScanning = false;
         private bool isScanCompleted = false;
 
-        // Публичное свойство для проверки из MainForm
         public bool IsScanCompleted => isScanCompleted;
 
-        // Вспомогательный класс для хранения найденной угрозы
         private class Threat
         {
             public string Name { get; set; }
             public string Description { get; set; }
             public string Risk { get; set; }
-            public string Hive { get; set; }
+            public string Hive { get; set; }         // "HKLM" | "HKCU"
             public string Path { get; set; }
             public string ValueName { get; set; }
             public object ValueData { get; set; }
@@ -47,11 +57,13 @@ namespace BunnyBlack.Forms
 
         public void BeginAutoScan()
         {
-            if (!isScanCompleted && !isScanning)
+            if (isScanCompleted || isScanning) return;
+            if (!this.IsHandleCreated)
             {
-                // Запускаем сканирование в фоновом потоке
-                Task.Run(() => PerformScan());
+                this.HandleCreated += (s, e) => BeginAutoScan();
+                return;
             }
+            Task.Run(() => PerformScan());
         }
 
         private void InitializeComponent()
@@ -63,12 +75,13 @@ namespace BunnyBlack.Forms
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 5,
+                RowCount = 6,
                 Padding = new Padding(20),
                 BackColor = Color.FromArgb(13, 13, 13)
             };
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 70));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
@@ -96,12 +109,21 @@ namespace BunnyBlack.Forms
             };
             mainLayout.Controls.Add(autoFixCheck, 0, 1);
 
+            scanProgress = new ProgressBar
+            {
+                Dock = DockStyle.Fill,
+                Style = ProgressBarStyle.Marquee,
+                MarqueeAnimationSpeed = 30,
+                Visible = false
+            };
+            mainLayout.Controls.Add(scanProgress, 0, 2);
+
             grid = CreateDarkGrid();
             grid.Columns.Clear();
             grid.Columns.Add("Name", "Угроза");
             grid.Columns.Add("Desc", "Описание");
             grid.Columns.Add("Risk", "Риск");
-            grid.Columns[0].Width = 200;
+            grid.Columns[0].Width = 220;
             grid.Columns[1].Width = 400;
             grid.Columns[2].Width = 100;
             grid.AllowUserToAddRows = false;
@@ -110,7 +132,7 @@ namespace BunnyBlack.Forms
 
             Panel gridPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(13, 13, 13) };
             gridPanel.Controls.Add(grid);
-            mainLayout.Controls.Add(gridPanel, 0, 2);
+            mainLayout.Controls.Add(gridPanel, 0, 3);
 
             logBox = new RichTextBox
             {
@@ -138,7 +160,7 @@ namespace BunnyBlack.Forms
                     Color.FromArgb(60, 60, 60), 1, ButtonBorderStyle.Solid);
             };
             logPanel.Controls.Add(logBox);
-            mainLayout.Controls.Add(logPanel, 0, 3);
+            mainLayout.Controls.Add(logPanel, 0, 4);
 
             FlowLayoutPanel buttonPanel = new FlowLayoutPanel
             {
@@ -180,7 +202,7 @@ namespace BunnyBlack.Forms
 
             buttonPanel.Controls.Add(scanButton);
             buttonPanel.Controls.Add(fixButton);
-            mainLayout.Controls.Add(buttonPanel, 0, 4);
+            mainLayout.Controls.Add(buttonPanel, 0, 5);
 
             this.Controls.Add(mainLayout);
         }
@@ -220,21 +242,15 @@ namespace BunnyBlack.Forms
             return grid;
         }
 
-        // ============================================================
-        // ГЛАВНОЕ СКАНИРОВАНИЕ (РЕАЛЬНОЕ)
-        // ============================================================
-
         private async void ScanButton_Click(object sender, EventArgs e)
         {
             if (isScanning) return;
             await Task.Run(() => PerformScan());
         }
 
-        // Вынесено в отдельный метод для вызова из MainForm без блокировки
         private void PerformScan()
         {
             if (isScanning) return;
-
             isScanning = true;
             isScanCompleted = false;
 
@@ -246,24 +262,43 @@ namespace BunnyBlack.Forms
                 foundThreats.Clear();
                 grid.Rows.Clear();
                 logBox.Clear();
+                if (scanProgress != null) scanProgress.Visible = true;
                 AppendLog("▶ Запуск глубокого сканирования системы...", Color.Cyan);
                 AppendLog("═══════════════════════════════════════════");
+
+                // диагностика
+                if (RegistryHelper.IsWinReEnvironment())
+                {
+                    AppendLog($"  [i] WinRE: оффлайн-кусты", Color.LightBlue);
+                    string status;
+                    RegistryHelper.LoadOfflineHives(out status);
+                    AppendLog($"  [i] {status}", Color.LightBlue);
+                }
             });
 
-            // Блок сканирования 1: Реестр (Ограничения)
-            ScanRegistryRestrictions();
+            var batch = new List<Threat>();
+            Action flush = () =>
+            {
+                if (batch.Count == 0) return;
+                var snapshot = new List<Threat>(batch);
+                batch.Clear();
+                UpdateUI(() =>
+                {
+                    foreach (var t in snapshot)
+                    {
+                        int idx = grid.Rows.Add(t.Name, t.Description, t.Risk);
+                        if (t.Risk == "Критический") grid.Rows[idx].Cells[2].Style.ForeColor = Color.Red;
+                        else if (t.Risk == "Высокий") grid.Rows[idx].Cells[2].Style.ForeColor = Color.OrangeRed;
+                    }
+                });
+            };
 
-            // Блок сканирования 2: ScancodeMap (Клавиатура)
-            ScanScancodeMap();
-
-            // Блок сканирования 3: Debuggers (Подмена антивирусов)
-            ScanDebuggers();
-
-            // Блок сканирования 4: DisallowRun (Чёрные списки)
-            ScanDisallowRun();
-
-            // Блок сканирования 5: Hosts File (Фишинг)
-            ScanHostsFile();
+            ScanRegistryRestrictions(batch, flush);
+            ScanScancodeMap(batch, flush);
+            ScanDebuggers(batch, flush);
+            ScanDisallowRun(batch, flush);
+            ScanHostsFile(batch, flush);
+            flush();
 
             UpdateUI(() =>
             {
@@ -273,28 +308,61 @@ namespace BunnyBlack.Forms
                 scanButton.Text = "Начать сканирование";
                 scanButton.Enabled = true;
                 fixButton.Enabled = foundThreats.Count > 0;
+                if (scanProgress != null) scanProgress.Visible = false;
                 isScanning = false;
                 isScanCompleted = true;
             });
         }
 
         // ============================================================
-        // РЕАЛЬНЫЕ МЕТОДЫ ПРОВЕРКИ
+        // ФИКС — проверка политик: теперь работает и в WinRE,
+        // через оффлайн-кусты. Каждая политика проверяется во всех
+        // возможных местах: HKLM Policy + HKCU Policy + оффлайн HKCU.
         // ============================================================
-
-        private void ScanRegistryRestrictions()
+        private void ScanRegistryRestrictions(List<Threat> batch, Action flush)
         {
+            // (name, desc, risk, hive, path, val, expected)
             var checks = new (string name, string desc, string risk, string hive, string path, string val, object expected)[]
             {
-                ("DisableTaskMgr", "Блокировка диспетчера задач", "Высокий", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableTaskMgr", 1),
-                ("DisableRegistryTools", "Блокировка редактора реестра", "Высокий", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableRegistryTools", 1),
-                ("DisableCMD", "Блокировка командной строки (CMD)", "Высокий", "HKCU", @"Software\Policies\Microsoft\Windows\System", "DisableCMD", 2),
-                ("NoControlPanel", "Скрытие Панели управления", "Средний", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoControlPanel", 1),
-                ("NoRun", "Блокировка меню 'Выполнить'", "Средний", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoRun", 1),
-                ("NoWinKeys", "Отключение горячих клавиш Win", "Средний", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoWinKeys", 1),
-                ("DisableLockWorkstation", "Блокировка блокировки ПК (Win+L)", "Средний", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableLockWorkstation", 1),
-                ("DisableChangePassword", "Блокировка смены пароля", "Средний", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableChangePassword", 1),
-                ("NoControlPanel", "Скрытие панели управления", "Средний", "HKCU", @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoControlPanel", 1)
+                // ============================================================
+                // User-policy — HKCU\...\Policies
+                // ============================================================
+                ("DisableTaskMgr", "Блокировка диспетчера задач", "Высокий", "HKCU",
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableTaskMgr", 1),
+                ("DisableRegistryTools", "Блокировка редактора реестра", "Высокий", "HKCU",
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableRegistryTools", 1),
+                ("DisableCMD", "Блокировка командной строки (CMD)", "Высокий", "HKCU",
+                    @"Software\Policies\Microsoft\Windows\System", "DisableCMD", 2),
+                ("NoControlPanel", "Скрытие Панели управления", "Средний", "HKCU",
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoControlPanel", 1),
+                ("NoRun", "Блокировка меню 'Выполнить'", "Средний", "HKCU",
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoRun", 1),
+                ("NoWinKeys", "Отключение горячих клавиш Win", "Средний", "HKCU",
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoWinKeys", 1),
+                ("DisableLockWorkstation", "Блокировка блокировки ПК (Win+L)", "Средний", "HKCU",
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableLockWorkstation", 1),
+                ("DisableChangePassword", "Блокировка смены пароля", "Средний", "HKCU",
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableChangePassword", 1),
+
+                // ============================================================
+                // Machine-wide policy — HKLM
+                // ============================================================
+                ("HKLM:DisableTaskMgr", "Блокировка диспетчера задач (HKLM)", "Высокий", "HKLM",
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableTaskMgr", 1),
+                ("HKLM:DisableRegistryTools", "Блокировка редактора реестра (HKLM)", "Высокий", "HKLM",
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableRegistryTools", 1),
+                ("HKLM:DisableCMD", "Блокировка CMD (HKLM)", "Высокий", "HKLM",
+                    @"SOFTWARE\Policies\Microsoft\Windows\System", "DisableCMD", 2),
+                ("HKLM:NoControlPanel", "Скрытие Панели управления (HKLM)", "Средний", "HKLM",
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoControlPanel", 1),
+                ("HKLM:NoRun", "Блокировка 'Выполнить' (HKLM)", "Средний", "HKLM",
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoRun", 1),
+                ("HKLM:NoViewOnDrive", "Ограничение доступа к дискам (HKLM)", "Средний", "HKLM",
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoViewOnDrive", null),
+                ("HKLM:DisableLockWorkstation", "Блокировка Win+L (HKLM)", "Средний", "HKLM",
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableLockWorkstation", 1),
+                ("HKLM:DisableChangePassword", "Блокировка смены пароля (HKLM)", "Средний", "HKLM",
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableChangePassword", 1),
             };
 
             foreach (var check in checks)
@@ -302,7 +370,7 @@ namespace BunnyBlack.Forms
                 bool found = CheckRegistryValue(check.hive, check.path, check.val, check.expected);
                 if (found)
                 {
-                    foundThreats.Add(new Threat
+                    var t = new Threat
                     {
                         Name = check.name,
                         Description = check.desc,
@@ -311,7 +379,10 @@ namespace BunnyBlack.Forms
                         Path = check.path,
                         ValueName = check.val,
                         RepairMethod = "DeleteValue"
-                    });
+                    };
+                    foundThreats.Add(t);
+                    batch.Add(t);
+                    if (batch.Count >= 20) flush();
                     UpdateUI(() => AppendLog($"  [!] Обнаружено: {check.name} ({check.risk})", Color.OrangeRed));
                 }
                 else
@@ -321,13 +392,13 @@ namespace BunnyBlack.Forms
             }
         }
 
-        private void ScanScancodeMap()
+        private void ScanScancodeMap(List<Threat> batch, Action flush)
         {
             string path = @"SYSTEM\CurrentControlSet\Control\Keyboard Layout";
             bool found = CheckRegistryValue("HKLM", path, "ScancodeMap", null);
             if (found)
             {
-                foundThreats.Add(new Threat
+                var t = new Threat
                 {
                     Name = "ScancodeMap",
                     Description = "Переназначение или блокировка клавиш клавиатуры",
@@ -336,23 +407,30 @@ namespace BunnyBlack.Forms
                     Path = path,
                     ValueName = "ScancodeMap",
                     RepairMethod = "DeleteValue"
-                });
-                UpdateUI(() => AppendLog($"  [!] Обнаружено: ScancodeMap (Критический) — клавиатура заблокирована!", Color.Red));
+                };
+                foundThreats.Add(t);
+                batch.Add(t);
+                if (batch.Count >= 20) flush();
+                UpdateUI(() => AppendLog("  [!] Обнаружено: ScancodeMap (Критический)", Color.Red));
             }
             else
             {
-                UpdateUI(() => AppendLog($"  [✓] Безопасно: ScancodeMap", Color.Gray));
+                UpdateUI(() => AppendLog("  [✓] Безопасно: ScancodeMap", Color.Gray));
             }
         }
 
-        private void ScanDebuggers()
+        private void ScanDebuggers(List<Threat> batch, Action flush)
         {
             string basePath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
             try
             {
-                using (var key = Registry.LocalMachine.OpenSubKey(basePath))
+                using (var key = OpenHiveKey("HKLM", basePath))
                 {
-                    if (key == null) return;
+                    if (key == null)
+                    {
+                        UpdateUI(() => AppendLog("  [!] Debuggers: ключ не открылся", Color.Orange));
+                        return;
+                    }
 
                     int foundCount = 0;
                     foreach (string subName in key.GetSubKeyNames())
@@ -362,35 +440,39 @@ namespace BunnyBlack.Forms
                             if (subKey != null && subKey.GetValue("Debugger") != null)
                             {
                                 foundCount++;
-                                foundThreats.Add(new Threat
+                                string capturedName = subName;
+                                var t = new Threat
                                 {
-                                    Name = $"Debugger: {subName}",
-                                    Description = "Подмена запуска через отладчик (блокировка антивирусов)",
+                                    Name = $"Debugger: {capturedName}",
+                                    Description = "Подмена запуска через отладчик",
                                     Risk = "Критический",
                                     Hive = "HKLM",
-                                    Path = basePath + "\\" + subName,
+                                    Path = basePath + "\\" + capturedName,
                                     ValueName = "Debugger",
                                     RepairMethod = "DeleteValue"
-                                });
-                                UpdateUI(() => AppendLog($"  [!] Обнаружено: Debugger в '{subName}' (Критический)", Color.Red));
+                                };
+                                foundThreats.Add(t);
+                                batch.Add(t);
+                                if (batch.Count >= 20) flush();
+                                UpdateUI(() => AppendLog($"  [!] Обнаружено: Debugger в '{capturedName}' (Критический)", Color.Red));
                             }
                         }
                     }
 
                     if (foundCount == 0)
-                        UpdateUI(() => AppendLog($"  [✓] Безопасно: Debuggers", Color.Gray));
+                        UpdateUI(() => AppendLog("  [✓] Безопасно: Debuggers", Color.Gray));
                 }
             }
-            catch { UpdateUI(() => AppendLog($"  [!] Ошибка доступа к Debuggers", Color.Red)); }
+            catch (Exception ex) { UpdateUI(() => AppendLog($"  [!] Ошибка Debuggers: {ex.Message}", Color.Red)); }
         }
 
-        private void ScanDisallowRun()
+        private void ScanDisallowRun(List<Threat> batch, Action flush)
         {
             string path = @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
             bool found = CheckRegistryValue("HKCU", path, "DisallowRun", 1);
             if (found)
             {
-                foundThreats.Add(new Threat
+                var t = new Threat
                 {
                     Name = "DisallowRun",
                     Description = "Чёрный список запрещённых к запуску программ",
@@ -399,23 +481,27 @@ namespace BunnyBlack.Forms
                     Path = path,
                     ValueName = "DisallowRun",
                     RepairMethod = "DeleteValue"
-                });
-                UpdateUI(() => AppendLog($"  [!] Обнаружено: DisallowRun (Высокий)", Color.OrangeRed));
+                };
+                foundThreats.Add(t);
+                batch.Add(t);
+                if (batch.Count >= 20) flush();
+                UpdateUI(() => AppendLog("  [!] Обнаружено: DisallowRun (Высокий)", Color.OrangeRed));
             }
             else
             {
-                UpdateUI(() => AppendLog($"  [✓] Безопасно: DisallowRun", Color.Gray));
+                UpdateUI(() => AppendLog("  [✓] Безопасно: DisallowRun", Color.Gray));
             }
         }
 
-        private void ScanHostsFile()
+        private void ScanHostsFile(List<Threat> batch, Action flush)
         {
-            string hostsPath = @"C:\Windows\System32\drivers\etc\hosts";
+            string sysDrive = RegistryHelper.GetSystemDrive();
+            string hostsPath = Path.Combine(sysDrive, @"Windows\System32\drivers\etc\hosts");
             try
             {
                 if (!File.Exists(hostsPath))
                 {
-                    UpdateUI(() => AppendLog($"  [✓] Файл hosts не найден", Color.Gray));
+                    UpdateUI(() => AppendLog($"  [✓] Hosts не найден ({hostsPath})", Color.Gray));
                     return;
                 }
 
@@ -430,33 +516,32 @@ namespace BunnyBlack.Forms
                     if (trimmed.StartsWith("#") || string.IsNullOrEmpty(trimmed)) continue;
 
                     if (trimmed.StartsWith("127.0.0.1") || trimmed.StartsWith("0.0.0.0"))
-                    {
                         foreach (string domain in protectedDomains)
-                        {
                             if (trimmed.Contains(domain))
-                            {
                                 suspiciousEntries.Add(trimmed);
-                            }
-                        }
-                    }
                 }
 
                 if (suspiciousEntries.Count > 0)
                 {
-                    foundThreats.Add(new Threat
+                    var t = new Threat
                     {
                         Name = "HostsFile",
                         Description = $"Фишинговые перенаправления: {string.Join("; ", suspiciousEntries)}",
                         Risk = "Критический",
                         RepairMethod = "FixHosts"
+                    };
+                    foundThreats.Add(t);
+                    batch.Add(t);
+                    if (batch.Count >= 20) flush();
+                    UpdateUI(() =>
+                    {
+                        AppendLog("  [!] Обнаружено: Фишинг в hosts (Критический)", Color.Red);
+                        foreach (var entry in suspiciousEntries) AppendLog($"    → {entry}", Color.Red);
                     });
-                    UpdateUI(() => AppendLog($"  [!] Обнаружено: Фишинг в hosts (Критический)", Color.Red));
-                    foreach (var entry in suspiciousEntries)
-                        UpdateUI(() => AppendLog($"    → {entry}", Color.Red));
                 }
                 else
                 {
-                    UpdateUI(() => AppendLog($"  [✓] Безопасно: HostsFile", Color.Gray));
+                    UpdateUI(() => AppendLog("  [✓] Безопасно: HostsFile", Color.Gray));
                 }
             }
             catch (Exception ex)
@@ -466,9 +551,8 @@ namespace BunnyBlack.Forms
         }
 
         // ============================================================
-        // МЕТОДЫ ИСПРАВЛЕНИЯ
+        // ИСПРАВЛЕНИЕ
         // ============================================================
-
         private void FixButton_Click(object sender, EventArgs e)
         {
             if (foundThreats.Count == 0) return;
@@ -497,11 +581,11 @@ namespace BunnyBlack.Forms
                     if (FixHostsFile())
                     {
                         fixedCount++;
-                        UpdateUI(() => AppendLog($"  [+] Исправлено: HostsFile", Color.LightGreen));
+                        UpdateUI(() => AppendLog("  [+] Исправлено: HostsFile", Color.LightGreen));
                     }
                     else
                     {
-                        UpdateUI(() => AppendLog($"  [-] Ошибка исправления: HostsFile", Color.Red));
+                        UpdateUI(() => AppendLog("  [-] Ошибка исправления: HostsFile", Color.Red));
                     }
                 }
             }
@@ -516,15 +600,66 @@ namespace BunnyBlack.Forms
         }
 
         // ============================================================
-        // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+        // ФИКС: OpenHiveKey — явно работает с оффлайн-кустами
+        // HKLM → BunnyBlack_Offline_SOFTWARE (или _SYSTEM)
+        // HKCU → BunnyBlack_Offline_HKCU, fallback на SOFTWARE
         // ============================================================
+        private RegistryKey OpenHiveKey(string hive, string path, bool writable = false)
+        {
+            try
+            {
+                if (!RegistryHelper.IsWinReEnvironment())
+                {
+                    RegistryKey baseKey = hive == "HKLM" ? Registry.LocalMachine : Registry.CurrentUser;
+                    return baseKey.OpenSubKey(path, writable);
+                }
+
+                // WinRE — грузим кусты
+                RegistryHelper.LoadOfflineHives();
+
+                string fullPath;
+
+                if (hive == "HKLM")
+                {
+                    if (path.StartsWith("SYSTEM\\", StringComparison.OrdinalIgnoreCase))
+                        fullPath = "BunnyBlack_Offline_SYSTEM\\" + path.Substring(7);
+                    else if (path.StartsWith("SOFTWARE\\", StringComparison.OrdinalIgnoreCase))
+                        fullPath = "BunnyBlack_Offline_SOFTWARE\\" + path.Substring(9);
+                    else
+                        fullPath = "BunnyBlack_Offline_SOFTWARE\\" + path;
+                }
+                else // HKCU
+                {
+                    // Сначала пробуем оффлайн-HKCU
+                    string hkcu = "BunnyBlack_Offline_HKCU\\" + path;
+                    var test = Registry.LocalMachine.OpenSubKey(hkcu, writable);
+                    if (test != null) return test;
+
+                    // Fallback: machine-wide policy из SOFTWARE
+                    string sw = "BunnyBlack_Offline_SOFTWARE\\" + path;
+                    var test2 = Registry.LocalMachine.OpenSubKey(sw, writable);
+                    if (test2 != null) return test2;
+
+                    return null;
+                }
+
+                Debug.WriteLine($"[OpenHiveKey] {hive}\\{path} → {fullPath}");
+                var key = Registry.LocalMachine.OpenSubKey(fullPath, writable);
+                if (key == null) Debug.WriteLine($"[OpenHiveKey] NULL for {fullPath}");
+                return key;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[OpenHiveKey] {ex.Message}");
+                return null;
+            }
+        }
 
         private bool CheckRegistryValue(string hive, string path, string valueName, object expectedValue)
         {
             try
             {
-                RegistryKey baseKey = hive == "HKLM" ? Registry.LocalMachine : Registry.CurrentUser;
-                using (var key = baseKey.OpenSubKey(path))
+                using (var key = OpenHiveKey(hive, path))
                 {
                     if (key == null) return false;
                     object val = key.GetValue(valueName);
@@ -543,8 +678,7 @@ namespace BunnyBlack.Forms
         {
             try
             {
-                RegistryKey baseKey = hive == "HKLM" ? Registry.LocalMachine : Registry.CurrentUser;
-                using (var key = baseKey.OpenSubKey(path, true))
+                using (var key = OpenHiveKey(hive, path, true))
                 {
                     if (key != null && key.GetValue(valueName) != null)
                     {
@@ -554,14 +688,19 @@ namespace BunnyBlack.Forms
                 }
                 return false;
             }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DeleteRegistryValue] {ex.Message}");
+                return false;
+            }
         }
 
         private bool FixHostsFile()
         {
             try
             {
-                string hostsPath = @"C:\Windows\System32\drivers\etc\hosts";
+                string sysDrive = RegistryHelper.GetSystemDrive();
+                string hostsPath = Path.Combine(sysDrive, @"Windows\System32\drivers\etc\hosts");
                 if (!File.Exists(hostsPath)) return false;
 
                 string[] lines = File.ReadAllLines(hostsPath, Encoding.UTF8);
@@ -580,16 +719,8 @@ namespace BunnyBlack.Forms
 
                     bool malicious = false;
                     if (trimmed.StartsWith("127.0.0.1") || trimmed.StartsWith("0.0.0.0"))
-                    {
                         foreach (string domain in protectedDomains)
-                        {
-                            if (trimmed.Contains(domain))
-                            {
-                                malicious = true;
-                                break;
-                            }
-                        }
-                    }
+                            if (trimmed.Contains(domain)) { malicious = true; break; }
 
                     if (!malicious) cleanLines.Add(line);
                 }
@@ -600,17 +731,10 @@ namespace BunnyBlack.Forms
             catch { return false; }
         }
 
-        // Утилита для безопасного обновления UI из фонового потока
         private void UpdateUI(Action action)
         {
-            if (this.InvokeRequired)
-            {
-                this.Invoke(action);
-            }
-            else
-            {
-                action();
-            }
+            if (this.InvokeRequired) this.Invoke(action);
+            else action();
         }
 
         private void AppendLog(string text, Color? color = null)

@@ -1,24 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "D:\\Проекты\\BunnyBlack\\BunnyBlack\\BunnyBlack.csproj": {}
+    "D:\\Проекты\\BunnyBlack-main\\BunnyBlack.csproj": {}
   },
   "projects": {
-    "D:\\Проекты\\BunnyBlack\\BunnyBlack\\BunnyBlack.csproj": {
+    "D:\\Проекты\\BunnyBlack-main\\BunnyBlack.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\Проекты\\BunnyBlack\\BunnyBlack\\BunnyBlack.csproj",
+        "projectUniqueName": "D:\\Проекты\\BunnyBlack-main\\BunnyBlack.csproj",
         "projectName": "BunnyBlack",
-        "projectPath": "D:\\Проекты\\BunnyBlack\\BunnyBlack\\BunnyBlack.csproj",
+        "projectPath": "D:\\Проекты\\BunnyBlack-main\\BunnyBlack.csproj",
         "packagesPath": "C:\\Users\\Codef1x\\.nuget\\packages\\",
-        "outputPath": "D:\\Проекты\\BunnyBlack\\BunnyBlack\\obj\\",
+        "outputPath": "D:\\Проекты\\BunnyBlack-main\\obj\\",
         "projectStyle": "PackageReference",
-        "fallbackFolders": [
-          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
-        ],
         "configFilePaths": [
           "C:\\Users\\Codef1x\\AppData\\Roaming\\NuGet\\NuGet.Config",
-          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
         "originalTargetFrameworks": [
@@ -26,7 +22,6 @@
         ],
         "sources": {
           "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
-          "C:\\Program Files\\dotnet\\library-packs": {},
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
@@ -46,7 +41,7 @@
           "auditLevel": "low",
           "auditMode": "direct"
         },
-        "SdkAnalysisLevel": "10.0.300"
+        "SdkAnalysisLevel": "10.0.400"
       },
       "frameworks": {
         "net8.0-windows": {
@@ -56,12 +51,16 @@
             "Microsoft.NET.ILLink.Tasks": {
               "suppressParent": "All",
               "target": "Package",
-              "version": "[8.0.28, )",
+              "version": "[8.0.31, )",
               "autoReferenced": true
             },
             "Microsoft.Web.WebView2": {
               "target": "Package",
               "version": "[1.0.4129.50, )"
+            },
+            "Newtonsoft.Json": {
+              "target": "Package",
+              "version": "[13.0.4, )"
             },
             "System.Management": {
               "target": "Package",
@@ -90,15 +89,19 @@
           "downloadDependencies": [
             {
               "name": "Microsoft.AspNetCore.App.Runtime.win-x64",
-              "version": "[8.0.28, 8.0.28]"
+              "version": "[8.0.31, 8.0.31]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Crossgen2.win-x64",
+              "version": "[8.0.31, 8.0.31]"
             },
             {
               "name": "Microsoft.NETCore.App.Runtime.win-x64",
-              "version": "[8.0.28, 8.0.28]"
+              "version": "[8.0.31, 8.0.31]"
             },
             {
               "name": "Microsoft.WindowsDesktop.App.Runtime.win-x64",
-              "version": "[8.0.28, 8.0.28]"
+              "version": "[8.0.31, 8.0.31]"
             }
           ],
           "frameworkReferences": {
@@ -109,7 +112,7 @@
               "privateAssets": "none"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.301/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.401/PortableRuntimeIdentifierGraph.json"
         }
       },
       "runtimes": {

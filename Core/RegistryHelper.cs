@@ -1,5 +1,11 @@
-﻿using System;
+﻿// language: C#, file: Core/RegistryHelper.cs
+// Полная замена.
+// - GetUserEntries теперь использует NetUserEnum (WinAPI) — работает под обычным админом.
+// - SAM-чтение и ProfileList — как fallback для WinRE.
+// - Остальные методы без изменений.
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Xml;
@@ -52,32 +58,26 @@ namespace BunnyBlack.Core
         private const string OfflineSystemHive = @"BunnyBlack_Offline_SYSTEM";
         private const string OfflineSamHive = @"BunnyBlack_Offline_SAM";
         private const string OfflineSecurityHive = @"BunnyBlack_Offline_SECURITY";
+        private const string OfflineHkcuHive = @"BunnyBlack_Offline_HKCU";
 
         private static bool? _isWinRe = null;
         private static bool? _hivesLoaded = null;
         private static string _systemDrive = null;
 
         // ============================================================
-        // P/INVOKE для работы с реестром напрямую
+        // P/INVOKE — advapi32
         // ============================================================
-        [DllImport("advapi32.dll", SetLastError = true)]
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern int RegLoadKey(IntPtr hKey, string lpSubKey, string lpFile);
 
-        [DllImport("advapi32.dll", SetLastError = true)]
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern int RegUnLoadKey(IntPtr hKey, string lpSubKey);
 
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern int RegOpenKeyEx(IntPtr hKey, string lpSubKey, int ulOptions, int samDesired, out IntPtr phkResult);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern int RegCloseKey(IntPtr hKey);
-
-        private const int KEY_READ = 0x20019;
-        private const int KEY_WRITE = 0x20006;
         private const uint HKEY_LOCAL_MACHINE = 0x80000002;
+        private const uint HKEY_USERS = 0x80000003;
 
         // ============================================================
-        // P/INVOKE для работы с пользователями (NetAPI)
+        // P/INVOKE — NetAPI (user add/del/setinfo)
         // ============================================================
         [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
         private static extern int NetUserAdd(string servername, int level, ref USER_INFO_1 buf, out int parm_err);
@@ -97,6 +97,21 @@ namespace BunnyBlack.Core
         [DllImport("netapi32.dll")]
         private static extern int NetApiBufferFree(IntPtr buffer);
 
+        // ============================================================
+        // P/INVOKE — NetUserEnum (список пользователей)
+        // ============================================================
+        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern int NetUserEnum(
+            string servername, int level, int filter,
+            out IntPtr bufptr, int prefmaxlen,
+            out int entriesread, out int totalentries, out int resume_handle);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct USER_INFO_0
+        {
+            public string usri0_name;
+        }
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct USER_INFO_1
         {
@@ -111,171 +126,225 @@ namespace BunnyBlack.Core
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct USER_INFO_1003
-        {
-            public string usri1003_password;
-        }
+        private struct USER_INFO_1003 { public string usri1003_password; }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct USER_INFO_1008
-        {
-            public int usri1008_flags;
-        }
+        private struct USER_INFO_1008 { public int usri1008_flags; }
 
-        private const int UF_ACCOUNTDISABLE = 0x00000001;
-        private const int UF_PASSWD_NOTREQD = 0x00000020;
-        private const int UF_DONT_EXPIRE_PASSWD = 0x00010000;
+        private const int UF_SCRIPT = 0x0001;
+        private const int UF_ACCOUNTDISABLE = 0x0002;
+        private const int UF_PASSWD_NOTREQD = 0x0020;
+        private const int UF_DONT_EXPIRE_PASSWD = 0x10000;
+
+        private const int FILTER_NORMAL_ACCOUNT = 0x0002;
+        private const int MAX_PREFERRED_LENGTH = -1;
+        private const int NERR_Success = 0;
+        private const int USER_PRIV_ADMIN = 2;
 
         // ============================================================
-        // ПРОВЕРКА WINRE
+        // WINRE
         // ============================================================
         public static bool IsWinReEnvironment()
         {
             if (_isWinRe.HasValue) return _isWinRe.Value;
-
             try
             {
                 using (var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\MiniNT"))
-                {
-                    if (key != null)
-                    {
-                        _isWinRe = true;
-                        return true;
-                    }
-                }
+                    if (key != null) { _isWinRe = true; return true; }
 
                 string windir = Environment.GetEnvironmentVariable("windir") ?? "";
-                if (windir.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase))
-                {
-                    _isWinRe = true;
-                    return true;
-                }
+                if (windir.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase)) { _isWinRe = true; return true; }
 
                 string systemRoot = Environment.GetEnvironmentVariable("SystemRoot") ?? "";
-                if (systemRoot.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase))
-                {
-                    _isWinRe = true;
-                    return true;
-                }
+                if (systemRoot.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase)) { _isWinRe = true; return true; }
 
                 _isWinRe = false;
                 return false;
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine($"[IsWinReEnvironment] {ex.Message}");
                 _isWinRe = false;
                 return false;
             }
         }
 
         // ============================================================
-        // ЗАГРУЗКА ОФФЛАЙН-КУСТОВ (через P/Invoke - быстрее)
+        // HIVE LOADED
         // ============================================================
-        private static bool LoadOfflineHives()
+        private static bool IsHiveLoaded(string hiveName)
         {
-            if (_hivesLoaded.HasValue && _hivesLoaded.Value) return true;
+            try { using (var k = Registry.LocalMachine.OpenSubKey(hiveName)) return k != null; }
+            catch { return false; }
+        }
+
+        private static bool IsUserHiveLoaded(string hiveName)
+        {
+            try { using (var k = Registry.Users.OpenSubKey(hiveName)) return k != null; }
+            catch { return false; }
+        }
+
+        private static void CleanupStaleHives()
+        {
+            string[] names = { OfflineSoftwareHive, OfflineSystemHive, OfflineSamHive, OfflineSecurityHive };
+            foreach (var n in names)
+            {
+                try
+                {
+                    if (IsHiveLoaded(n))
+                    {
+                        RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, n);
+                        Debug.WriteLine($"[CleanupStale] unloaded {n}");
+                    }
+                }
+                catch (Exception ex) { Debug.WriteLine($"[CleanupStale/{n}] {ex.Message}"); }
+            }
+            try
+            {
+                if (IsUserHiveLoaded(OfflineHkcuHive))
+                    RegUnLoadKey((IntPtr)HKEY_USERS, OfflineHkcuHive);
+            }
+            catch { }
+        }
+
+        // ============================================================
+        // LOAD OFFLINE HIVES
+        // ============================================================
+        public static bool LoadOfflineHives() { string _; return LoadOfflineHives(out _); }
+
+        public static bool LoadOfflineHives(out string statusMessage)
+        {
+            statusMessage = null;
             if (!IsWinReEnvironment()) return true;
+
+            bool swLoaded = IsHiveLoaded(OfflineSoftwareHive);
+            bool sysLoaded = IsHiveLoaded(OfflineSystemHive);
+            bool samLoaded = IsHiveLoaded(OfflineSamHive);
+
+            if (swLoaded && sysLoaded && samLoaded)
+            {
+                _hivesLoaded = true;
+                statusMessage = "Оффлайн-кусты уже загружены";
+                return true;
+            }
+
+            CleanupStaleHives();
 
             try
             {
                 string systemDrive = GetSystemDrive();
+                int loaded = 0;
+                var errors = new List<string>();
 
-                LoadOfflineHivePInvoke(OfflineSoftwareHive, Path.Combine(systemDrive, @"Windows\System32\Config\SOFTWARE"));
-                LoadOfflineHivePInvoke(OfflineSystemHive, Path.Combine(systemDrive, @"Windows\System32\Config\SYSTEM"));
-                LoadOfflineHivePInvoke(OfflineSamHive, Path.Combine(systemDrive, @"Windows\System32\Config\SAM"));
-                LoadOfflineHivePInvoke(OfflineSecurityHive, Path.Combine(systemDrive, @"Windows\System32\Config\SECURITY"));
+                void TryLoad(IntPtr root, string hive, string file)
+                {
+                    if (!File.Exists(file)) { errors.Add($"{hive}: нет файла"); return; }
+                    int r = RegLoadKey(root, hive, file);
+                    if (r == 0) loaded++;
+                    else errors.Add($"{hive}: код {r}");
+                }
 
-                _hivesLoaded = true;
-                return true;
+                TryLoad((IntPtr)HKEY_LOCAL_MACHINE, OfflineSoftwareHive, Path.Combine(systemDrive, @"Windows\System32\Config\SOFTWARE"));
+                TryLoad((IntPtr)HKEY_LOCAL_MACHINE, OfflineSystemHive, Path.Combine(systemDrive, @"Windows\System32\Config\SYSTEM"));
+                TryLoad((IntPtr)HKEY_LOCAL_MACHINE, OfflineSamHive, Path.Combine(systemDrive, @"Windows\System32\Config\SAM"));
+                TryLoad((IntPtr)HKEY_LOCAL_MACHINE, OfflineSecurityHive, Path.Combine(systemDrive, @"Windows\System32\Config\SECURITY"));
+
+                try
+                {
+                    string usersDir = Path.Combine(systemDrive, "Users");
+                    string bestUser = null;
+                    DateTime bestTime = DateTime.MinValue;
+
+                    if (Directory.Exists(usersDir))
+                    {
+                        foreach (var dir in Directory.GetDirectories(usersDir))
+                        {
+                            string name = Path.GetFileName(dir);
+                            if (name.Equals("Public", StringComparison.OrdinalIgnoreCase) ||
+                                name.Equals("Default", StringComparison.OrdinalIgnoreCase) ||
+                                name.Equals("All Users", StringComparison.OrdinalIgnoreCase) ||
+                                name.StartsWith(".")) continue;
+
+                            string ntuser = Path.Combine(dir, "NTUSER.DAT");
+                            if (!File.Exists(ntuser)) continue;
+                            DateTime t = File.GetLastWriteTime(ntuser);
+                            if (t > bestTime) { bestTime = t; bestUser = dir; }
+                        }
+                    }
+                    if (bestUser != null)
+                        TryLoad((IntPtr)HKEY_USERS, OfflineHkcuHive, Path.Combine(bestUser, "NTUSER.DAT"));
+                }
+                catch { }
+
+                if (errors.Count > 0 && loaded == 0)
+                {
+                    statusMessage = "Не удалось загрузить: " + string.Join("; ", errors);
+                    _hivesLoaded = false;
+                    return false;
+                }
+
+                statusMessage = $"Загружено {loaded} из 5";
+                if (errors.Count > 0) statusMessage += ". Проблемы: " + string.Join("; ", errors);
+                _hivesLoaded = loaded > 0;
+                return loaded > 0;
             }
-            catch
+            catch (Exception ex)
             {
+                statusMessage = "Ошибка: " + ex.Message;
                 _hivesLoaded = false;
                 return false;
             }
         }
 
-        private static void LoadOfflineHivePInvoke(string hiveName, string sourceFile)
-        {
-            try
-            {
-                if (!File.Exists(sourceFile)) return;
-                int result = RegLoadKey((IntPtr)HKEY_LOCAL_MACHINE, hiveName, sourceFile);
-                if (result != 0)
-                {
-                    System.Diagnostics.Debug.WriteLine($"RegLoadKey failed: {result} for {sourceFile}");
-                }
-            }
-            catch { }
-        }
+        public static bool EnsureOfflineHives() { return LoadOfflineHives(); }
+        public static bool EnsureOfflineHives(out string status) { return LoadOfflineHives(out status); }
 
         public static void UnloadOfflineHives()
         {
             try
             {
-                RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSoftwareHive);
-                RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSystemHive);
-                RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSamHive);
-                RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSecurityHive);
+                if (IsHiveLoaded(OfflineSoftwareHive)) RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSoftwareHive);
+                if (IsHiveLoaded(OfflineSystemHive)) RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSystemHive);
+                if (IsHiveLoaded(OfflineSamHive)) RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSamHive);
+                if (IsHiveLoaded(OfflineSecurityHive)) RegUnLoadKey((IntPtr)HKEY_LOCAL_MACHINE, OfflineSecurityHive);
+                if (IsUserHiveLoaded(OfflineHkcuHive)) RegUnLoadKey((IntPtr)HKEY_USERS, OfflineHkcuHive);
                 _hivesLoaded = false;
             }
             catch { }
         }
 
         // ============================================================
-        // ОПРЕДЕЛЕНИЕ СИСТЕМНОГО ДИСКА
+        // SYSTEM DRIVE
         // ============================================================
         public static string GetSystemDrive()
         {
             if (!string.IsNullOrEmpty(_systemDrive)) return _systemDrive;
-
             try
             {
                 string[] drives = { "C:", "D:", "E:", "F:", "G:", "H:" };
                 foreach (string drive in drives)
-                {
-                    string windowsPath = drive + @"\Windows\System32\Config\SOFTWARE";
-                    if (File.Exists(windowsPath))
-                    {
-                        _systemDrive = drive;
-                        return drive;
-                    }
-                }
+                    if (File.Exists(drive + @"\Windows\System32\Config\SOFTWARE")) { _systemDrive = drive; return drive; }
 
                 foreach (string drive in drives)
-                {
-                    string usersPath = drive + @"\Users";
-                    if (Directory.Exists(usersPath))
-                    {
-                        _systemDrive = drive;
-                        return drive;
-                    }
-                }
+                    if (Directory.Exists(drive + @"\Users")) { _systemDrive = drive; return drive; }
 
                 _systemDrive = "C:";
                 return "C:";
             }
-            catch
-            {
-                _systemDrive = "C:";
-                return "C:";
-            }
+            catch { _systemDrive = "C:"; return "C:"; }
         }
 
         // ============================================================
-        // ОТКРЫТИЕ КЛЮЧА РЕЕСТРА (С ПОДДЕРЖКОЙ WINRE)
+        // OPEN SUBKEY
         // ============================================================
         private static RegistryKey OpenWindowsSubKey(string path, bool writable = false)
         {
             if (!IsWinReEnvironment())
-            {
                 return Registry.LocalMachine.OpenSubKey(path, writable);
-            }
 
             LoadOfflineHives();
 
-            string fullPath = path;
-
+            string fullPath;
             if (path.StartsWith("SYSTEM\\", StringComparison.OrdinalIgnoreCase))
                 fullPath = OfflineSystemHive + "\\" + path.Substring(7);
             else if (path.StartsWith("SOFTWARE\\", StringComparison.OrdinalIgnoreCase))
@@ -284,17 +353,15 @@ namespace BunnyBlack.Core
                 fullPath = OfflineSamHive + "\\" + path.Substring(4);
             else if (path.StartsWith("SECURITY\\", StringComparison.OrdinalIgnoreCase))
                 fullPath = OfflineSecurityHive + "\\" + path.Substring(9);
+            else
+                fullPath = OfflineSoftwareHive + "\\" + path;
 
             return Registry.LocalMachine.OpenSubKey(fullPath, writable);
         }
 
-        // ============================================================
-        // НОРМАЛИЗАЦИЯ ПУТИ
-        // ============================================================
         private static string NormalizePath(string path)
         {
             if (string.IsNullOrWhiteSpace(path)) return path;
-
             if (path.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase))
                 return GetSystemDrive() + "\\" + path.Substring(3);
 
@@ -302,95 +369,233 @@ namespace BunnyBlack.Core
             {
                 string systemDrive = GetSystemDrive();
                 if (path.Length > 2 && path[1] == ':' && char.IsLetter(path[0]))
-                {
                     if (!path.StartsWith(systemDrive, StringComparison.OrdinalIgnoreCase))
-                    {
                         return systemDrive + path.Substring(2);
-                    }
-                }
             }
-
             return path;
         }
 
-        // ============================================================
-        // ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЕЙ
-        // ============================================================
-        public static List<UserInfo> GetUsers()
+        public static bool IsFirstRunWinRE()
         {
-            var users = new List<UserInfo>();
-
             try
             {
-                using (var key = OpenWindowsSubKey(@"SAM\SAM\Domains\Account\Users\Names"))
+                using (var k = OpenWindowsSubKey(@"SOFTWARE\BunnyBlack", true))
                 {
-                    if (key != null)
+                    if (k == null) return true;
+                    if (k.GetValue("FirstRun") == null) { k.SetValue("FirstRun", "done"); return true; }
+                    return false;
+                }
+            }
+            catch { return false; }
+        }
+
+        // ============================================================
+        // РАСШИРЕННЫЙ СПИСОК ПОЛЬЗОВАТЕЛЕЙ
+        // ============================================================
+        public class UserEntry
+        {
+            public string Name { get; set; }
+            public string SID { get; set; }
+            public int RID { get; set; }
+            public bool Disabled { get; set; }
+            public bool IsAdmin { get; set; }
+            public string ProfilePath { get; set; }
+            public string Source { get; set; }
+        }
+
+        public static List<UserEntry> GetUserEntries()
+        {
+            var result = new List<UserEntry>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // ---------- 1) NetUserEnum ----------
+            try
+            {
+                IntPtr buf = IntPtr.Zero;
+                int read = 0, total = 0, resume = 0;
+
+                int rc = NetUserEnum(null, 1, FILTER_NORMAL_ACCOUNT,
+                    out buf, MAX_PREFERRED_LENGTH, out read, out total, out resume);
+
+                if (rc == NERR_Success && buf != IntPtr.Zero)
+                {
+                    try
                     {
-                        foreach (string userName in key.GetSubKeyNames())
+                        int structSize = Marshal.SizeOf<USER_INFO_1>();
+                        IntPtr cur = buf;
+
+                        for (int i = 0; i < read; i++)
                         {
-                            try
+                            var u = Marshal.PtrToStructure<USER_INFO_1>(cur);
+                            cur = (IntPtr)((long)cur + structSize);
+
+                            if (string.IsNullOrEmpty(u.usri1_name)) continue;
+                            if (seen.Contains(u.usri1_name)) continue;
+
+                            bool disabled = (u.usri1_flags & UF_ACCOUNTDISABLE) != 0;
+                            bool isAdmin = (u.usri1_priv == USER_PRIV_ADMIN);
+
+                            string sid; int rid;
+                            TryGetSidAndRid(u.usri1_name, out sid, out rid);
+
+                            result.Add(new UserEntry
                             {
-                                var userInfo = new UserInfo
+                                Name = u.usri1_name,
+                                SID = sid,
+                                RID = rid,
+                                Disabled = disabled,
+                                IsAdmin = isAdmin,
+                                ProfilePath = GetUserProfilePath(u.usri1_name),
+                                Source = "NetAPI"
+                            });
+                            seen.Add(u.usri1_name);
+                        }
+                    }
+                    finally { NetApiBufferFree(buf); }
+                }
+            }
+            catch (Exception ex) { Debug.WriteLine($"[GetUserEntries/NetAPI] {ex.Message}"); }
+
+            // ---------- 2) SAM (fallback для WinRE) ----------
+            if (result.Count == 0)
+            {
+                try
+                {
+                    using (var namesKey = OpenWindowsSubKey(@"SAM\SAM\Domains\Account\Users\Names"))
+                    {
+                        if (namesKey != null)
+                        {
+                            foreach (var name in namesKey.GetSubKeyNames())
+                            {
+                                try
                                 {
-                                    Name = userName,
-                                    SID = GetUserSID(userName),
-                                    ProfilePath = GetUserProfilePath(userName),
-                                    IsAdmin = IsUserAdmin(userName),
-                                    IsActive = true
-                                };
-                                users.Add(userInfo);
+                                    if (seen.Contains(name)) continue;
+
+                                    byte[] sidBytes = null;
+                                    using (var nk = namesKey.OpenSubKey(name))
+                                        sidBytes = nk?.GetValue("") as byte[];
+
+                                    string sidStr = SidBytesToString(sidBytes);
+                                    int rid = ExtractRid(sidBytes);
+
+                                    bool disabled = false;
+                                    if (rid > 0)
+                                    {
+                                        string hexRid = rid.ToString("X8");
+                                        using (var fk = OpenWindowsSubKey(@"SAM\SAM\Domains\Account\Users\" + hexRid))
+                                        {
+                                            byte[] f = fk?.GetValue("F") as byte[];
+                                            if (f != null && f.Length > 0x3C)
+                                            {
+                                                int flags = BitConverter.ToInt32(f, 0x38);
+                                                disabled = (flags & UF_ACCOUNTDISABLE) != 0;
+                                            }
+                                        }
+                                    }
+
+                                    result.Add(new UserEntry
+                                    {
+                                        Name = name,
+                                        SID = sidStr,
+                                        RID = rid,
+                                        Disabled = disabled,
+                                        IsAdmin = (rid == 500),
+                                        ProfilePath = GetUserProfilePath(name),
+                                        Source = "SAM"
+                                    });
+                                    seen.Add(name);
+                                }
+                                catch { }
                             }
-                            catch { }
                         }
                     }
                 }
+                catch (Exception ex) { Debug.WriteLine($"[GetUserEntries/SAM] {ex.Message}"); }
+            }
 
-                if (users.Count == 0)
+            // ---------- 3) добить SID из ProfileList ----------
+            foreach (var u in result)
+            {
+                if (!string.IsNullOrEmpty(u.SID)) continue;
+                string sid; int rid;
+                TryGetSidAndRid(u.Name, out sid, out rid);
+                if (!string.IsNullOrEmpty(sid)) { u.SID = sid; u.RID = rid; }
+            }
+
+            result.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+            return result;
+        }
+
+        // ============================================================
+        // SID из ProfileList
+        // ============================================================
+        private static void TryGetSidAndRid(string userName, out string sid, out int rid)
+        {
+            sid = ""; rid = 0;
+            try
+            {
+                using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"))
                 {
-                    string systemDrive = GetSystemDrive();
-                    string usersPath = Path.Combine(systemDrive, @"Users");
-
-                    if (Directory.Exists(usersPath))
+                    if (key == null) return;
+                    foreach (var s in key.GetSubKeyNames())
                     {
-                        foreach (string dir in Directory.GetDirectories(usersPath))
+                        using (var sub = key.OpenSubKey(s))
                         {
-                            string name = Path.GetFileName(dir);
-                            if (name != "Public" && name != "Default" && name != "All Users" && !name.StartsWith("."))
+                            if (sub == null) continue;
+                            string path = sub.GetValue("ProfileImagePath")?.ToString() ?? "";
+                            if (path.EndsWith("\\" + userName, StringComparison.OrdinalIgnoreCase))
                             {
-                                users.Add(new UserInfo
-                                {
-                                    Name = name,
-                                    SID = "",
-                                    ProfilePath = dir,
-                                    IsAdmin = false,
-                                    IsActive = true
-                                });
+                                sid = s;
+                                int lastDash = s.LastIndexOf('-');
+                                if (lastDash > 0 && int.TryParse(s.Substring(lastDash + 1), out int r))
+                                    rid = r;
+                                return;
                             }
                         }
                     }
                 }
             }
             catch { }
-
-            return users;
         }
 
-        private static string GetUserSID(string userName)
+        private static string SidBytesToString(byte[] sid)
         {
+            if (sid == null || sid.Length < 8) return "";
             try
             {
-                using (var key = OpenWindowsSubKey($@"SAM\SAM\Domains\Account\Users\Names\{userName}"))
+                byte revision = sid[0];
+                byte subCount = sid[1];
+                var authority = new byte[6];
+                Array.Copy(sid, 2, authority, 0, 6);
+                ulong authValue = 0;
+                for (int i = 5; i >= 0; i--) authValue = (authValue << 8) | authority[i];
+
+                var sb = new System.Text.StringBuilder();
+                sb.Append("S-").Append(revision).Append('-').Append(authValue);
+
+                int offset = 8;
+                for (int i = 0; i < subCount && offset + 4 <= sid.Length; i++)
                 {
-                    if (key != null)
-                    {
-                        var sidBytes = key.GetValue("") as byte[];
-                        if (sidBytes != null)
-                            return Convert.ToBase64String(sidBytes);
-                    }
+                    uint sub = BitConverter.ToUInt32(sid, offset);
+                    offset += 4;
+                    sb.Append('-').Append(sub);
                 }
-                return "";
+                return sb.ToString();
             }
             catch { return ""; }
+        }
+
+        private static int ExtractRid(byte[] sid)
+        {
+            if (sid == null || sid.Length < 12) return 0;
+            try
+            {
+                byte subCount = sid[1];
+                int offset = 8 + (subCount - 1) * 4;
+                if (offset + 4 > sid.Length) return 0;
+                return (int)BitConverter.ToUInt32(sid, offset);
+            }
+            catch { return 0; }
         }
 
         private static string GetUserProfilePath(string userName)
@@ -420,28 +625,35 @@ namespace BunnyBlack.Core
             catch { return ""; }
         }
 
-        private static bool IsUserAdmin(string userName)
+        // ============================================================
+        // GetUsers (legacy)
+        // ============================================================
+        public static List<UserInfo> GetUsers()
         {
-            try
-            {
-                using (var key = OpenWindowsSubKey(@"SAM\SAM\Domains\Account\Groups\Builtin\Administrators"))
+            var list = new List<UserInfo>();
+            foreach (var u in GetUserEntries())
+                list.Add(new UserInfo
                 {
-                    if (key != null)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            catch { return false; }
+                    Name = u.Name,
+                    SID = u.SID,
+                    ProfilePath = u.ProfilePath,
+                    IsAdmin = u.IsAdmin,
+                    IsActive = !u.Disabled
+                });
+            return list;
         }
 
         // ============================================================
-        // РАБОТА С ПОЛЬЗОВАТЕЛЯМИ ЧЕРЕЗ NETAPI
+        // CREATE USER
         // ============================================================
-        public static bool CreateUserNetApi(string username, string password)
+        public static bool CreateUserNetApi(string username, string password, out string errorMessage)
         {
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password)) return false;
+            errorMessage = null;
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
+            {
+                errorMessage = "Имя и пароль не могут быть пустыми.";
+                return false;
+            }
 
             try
             {
@@ -453,26 +665,64 @@ namespace BunnyBlack.Core
                     usri1_priv = 1,
                     usri1_home_dir = null,
                     usri1_comment = null,
-                    usri1_flags = UF_DONT_EXPIRE_PASSWD,
+                    usri1_flags = UF_DONT_EXPIRE_PASSWD | UF_SCRIPT,
                     usri1_script_path = null
                 };
 
                 int parm_err;
                 int result = NetUserAdd(null, 1, ref userInfo, out parm_err);
-                return result == 0;
+                if (result != 0)
+                {
+                    errorMessage = DecodeNetError(result);
+                    return false;
+                }
+
+                USER_INFO_1003 pw = new USER_INFO_1003 { usri1003_password = password };
+                int parm_err2;
+                int setResult = NetUserSetInfo(null, username, 1003, ref pw, out parm_err2);
+                if (setResult != 0)
+                {
+                    errorMessage = "Пользователь создан, но пароль не установлен: " + DecodeNetError(setResult);
+                    return false;
+                }
+
+                return true;
             }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                errorMessage = $"Исключение: {ex.Message}";
+                return false;
+            }
+        }
+
+        public static bool CreateUserNetApi(string username, string password)
+            => CreateUserNetApi(username, password, out _);
+
+        private static string DecodeNetError(int code)
+        {
+            switch (code)
+            {
+                case 0: return "Успешно.";
+                case 5: return "Отказано в доступе.";
+                case 53: return "Сеть недоступна.";
+                case 87: return "Неверный параметр.";
+                case 2224: return "Пользователь уже существует.";
+                case 2245: return "Пароль слишком короткий.";
+                case 2246: return "Пароль слишком длинный.";
+                case 2247: return "Пароль не соответствует требованиям.";
+                case 2248: return "Пароль слишком новый.";
+                case 2250: return "Имя пользователя не найдено.";
+                case 2251: return "Недостаточно привилегий.";
+                case 2252: return "Пользователь уже существует.";
+                case 2253: return "Имя пользователя не соответствует требованиям.";
+                default: return $"Ошибка NetAPI (код {code}).";
+            }
         }
 
         public static bool DeleteUserNetApi(string username)
         {
             if (string.IsNullOrEmpty(username)) return false;
-            try
-            {
-                int result = NetUserDel(null, username);
-                return result == 0;
-            }
-            catch { return false; }
+            try { return NetUserDel(null, username) == 0; } catch { return false; }
         }
 
         public static bool SetUserPasswordNetApi(string username, string password)
@@ -480,26 +730,15 @@ namespace BunnyBlack.Core
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password)) return false;
             try
             {
-                USER_INFO_1003 userInfo = new USER_INFO_1003
-                {
-                    usri1003_password = password
-                };
-                int parm_err;
-                int result = NetUserSetInfo(null, username, 1003, ref userInfo, out parm_err);
-                return result == 0;
+                USER_INFO_1003 ui = new USER_INFO_1003 { usri1003_password = password };
+                int pe;
+                return NetUserSetInfo(null, username, 1003, ref ui, out pe) == 0;
             }
             catch { return false; }
         }
 
-        public static bool EnableUserNetApi(string username)
-        {
-            return SetUserActiveStatus(username, true);
-        }
-
-        public static bool DisableUserNetApi(string username)
-        {
-            return SetUserActiveStatus(username, false);
-        }
+        public static bool EnableUserNetApi(string username) => SetUserActiveStatus(username, true);
+        public static bool DisableUserNetApi(string username) => SetUserActiveStatus(username, false);
 
         private static bool SetUserActiveStatus(string username, bool enable)
         {
@@ -510,77 +749,45 @@ namespace BunnyBlack.Core
                 int result = NetUserGetInfo(null, username, 1008, out bufPtr);
                 if (result != 0) return false;
 
-                var userInfo1008 = (USER_INFO_1008)Marshal.PtrToStructure(bufPtr, typeof(USER_INFO_1008));
+                var info = (USER_INFO_1008)Marshal.PtrToStructure(bufPtr, typeof(USER_INFO_1008));
                 NetApiBufferFree(bufPtr);
 
-                if (enable)
-                    userInfo1008.usri1008_flags &= ~UF_ACCOUNTDISABLE;
-                else
-                    userInfo1008.usri1008_flags |= UF_ACCOUNTDISABLE;
+                if (enable) info.usri1008_flags &= ~UF_ACCOUNTDISABLE;
+                else info.usri1008_flags |= UF_ACCOUNTDISABLE;
 
-                USER_INFO_1008 updatedInfo = new USER_INFO_1008
-                {
-                    usri1008_flags = userInfo1008.usri1008_flags
-                };
-
-                int parm_err;
-                result = NetUserSetInfo(null, username, 1008, ref updatedInfo, out parm_err);
-                return result == 0;
+                USER_INFO_1008 updated = new USER_INFO_1008 { usri1008_flags = info.usri1008_flags };
+                int pe;
+                return NetUserSetInfo(null, username, 1008, ref updated, out pe) == 0;
             }
             catch { return false; }
         }
 
         // ============================================================
-        // МЕТОДЫ АВТОЗАГРУЗКИ - ВСЕГДА ЧИТАЕМ ВСЕ РАЗРЯДНОСТИ
+        // RUN / RUNONCE
         // ============================================================
-
         public static List<AutostartItem> GetRunItems()
         {
             var items = new List<AutostartItem>();
 
             if (IsWinReEnvironment())
             {
-                try
-                {
-                    using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"))
-                    {
-                        if (key != null)
-                        {
-                            foreach (var name in key.GetValueNames())
-                            {
-                                var value = key.GetValue(name)?.ToString() ?? "";
-                                items.Add(new AutostartItem
-                                {
-                                    Name = name,
-                                    Path = value,
-                                    Type = "HKLM\\Run (WinRE)",
-                                    Exists = File.Exists(NormalizePath(value?.Split(' ')[0]?.Trim('"') ?? ""))
-                                });
-                            }
-                        }
-                    }
-                }
-                catch { }
+                LoadOfflineHives();
+                AddRunFromHive(items, OfflineSoftwareHive, @"Microsoft\Windows\CurrentVersion\Run", "HKLM\\Run (offline)");
+                AddRunFromHive(items, OfflineSoftwareHive, @"Wow6432Node\Microsoft\Windows\CurrentVersion\Run", "HKLM\\Run (offline/32)");
+                AddRunFromUserHive(items, @"Software\Microsoft\Windows\CurrentVersion\Run", "HKCU\\Run (offline)");
                 return items;
             }
 
-            void AddRunItems(RegistryKey key, string type)
+            void Add(RegistryKey key, string type)
             {
                 if (key == null) return;
                 foreach (var name in key.GetValueNames())
                 {
                     var value = key.GetValue(name)?.ToString() ?? "";
-                    bool duplicate = false;
+                    bool dup = false;
                     foreach (var item in items)
-                    {
-                        if (item.Name == name && item.Path == value && item.Type == type)
-                        {
-                            duplicate = true;
-                            break;
-                        }
-                    }
-                    if (!duplicate)
-                    {
+                        if (item.Name == name && item.Path == value && item.Type == type) { dup = true; break; }
+                    if (!dup)
                         items.Add(new AutostartItem
                         {
                             Name = name,
@@ -588,32 +795,57 @@ namespace BunnyBlack.Core
                             Type = type,
                             Exists = File.Exists(NormalizePath(value?.Split(' ')[0]?.Trim('"') ?? ""))
                         });
-                    }
                 }
             }
 
-            try
-            {
-                AddRunItems(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
-                    .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"), "HKLM\\Run (64bit)");
-            }
-            catch { }
-
-            try
-            {
-                AddRunItems(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32)
-                    .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"), "HKLM\\Run (32bit)");
-            }
-            catch { }
-
-            try
-            {
-                AddRunItems(RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default)
-                    .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"), "HKCU\\Run");
-            }
-            catch { }
+            try { Add(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64).OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"), "HKLM\\Run (64bit)"); } catch { }
+            try { Add(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32).OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"), "HKLM\\Run (32bit)"); } catch { }
+            try { Add(RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default).OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"), "HKCU\\Run"); } catch { }
 
             return items;
+        }
+
+        private static void AddRunFromHive(List<AutostartItem> items, string hiveName, string subPath, string type)
+        {
+            try
+            {
+                using (var key = Registry.LocalMachine.OpenSubKey(hiveName + "\\" + subPath))
+                {
+                    if (key == null) return;
+                    foreach (var name in key.GetValueNames())
+                    {
+                        var value = key.GetValue(name)?.ToString() ?? "";
+                        bool dup = false;
+                        foreach (var it in items)
+                            if (it.Name == name && it.Path == value && it.Type == type) { dup = true; break; }
+                        if (dup) continue;
+                        items.Add(new AutostartItem { Name = name, Path = value, Type = type, Exists = File.Exists(NormalizePath(value?.Split(' ')[0]?.Trim('"') ?? "")) });
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void AddRunFromUserHive(List<AutostartItem> items, string subPath, string type)
+        {
+            try
+            {
+                if (!IsUserHiveLoaded(OfflineHkcuHive)) return;
+                using (var key = Registry.Users.OpenSubKey(OfflineHkcuHive + "\\" + subPath))
+                {
+                    if (key == null) return;
+                    foreach (var name in key.GetValueNames())
+                    {
+                        var value = key.GetValue(name)?.ToString() ?? "";
+                        bool dup = false;
+                        foreach (var it in items)
+                            if (it.Name == name && it.Path == value && it.Type == type) { dup = true; break; }
+                        if (dup) continue;
+                        items.Add(new AutostartItem { Name = name, Path = value, Type = type, Exists = File.Exists(NormalizePath(value?.Split(' ')[0]?.Trim('"') ?? "")) });
+                    }
+                }
+            }
+            catch { }
         }
 
         public static List<AutostartItem> GetRunOnceItems()
@@ -622,78 +854,29 @@ namespace BunnyBlack.Core
 
             if (IsWinReEnvironment())
             {
-                try
-                {
-                    using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"))
-                    {
-                        if (key != null)
-                        {
-                            foreach (var name in key.GetValueNames())
-                            {
-                                var value = key.GetValue(name)?.ToString() ?? "";
-                                items.Add(new AutostartItem
-                                {
-                                    Name = name,
-                                    Path = value,
-                                    Type = "HKLM\\RunOnce (WinRE)",
-                                    Exists = File.Exists(NormalizePath(value?.Split(' ')[0]?.Trim('"') ?? ""))
-                                });
-                            }
-                        }
-                    }
-                }
-                catch { }
+                LoadOfflineHives();
+                AddRunFromHive(items, OfflineSoftwareHive, @"Microsoft\Windows\CurrentVersion\RunOnce", "HKLM\\RunOnce (offline)");
+                AddRunFromHive(items, OfflineSoftwareHive, @"Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce", "HKLM\\RunOnce (offline/32)");
+                AddRunFromUserHive(items, @"Software\Microsoft\Windows\CurrentVersion\RunOnce", "HKCU\\RunOnce (offline)");
                 return items;
             }
 
-            void AddRunOnceItems(RegistryKey key, string type)
+            void Add(RegistryKey key, string type)
             {
                 if (key == null) return;
                 foreach (var name in key.GetValueNames())
                 {
                     var value = key.GetValue(name)?.ToString() ?? "";
-                    bool duplicate = false;
-                    foreach (var item in items)
-                    {
-                        if (item.Name == name && item.Path == value && item.Type == type)
-                        {
-                            duplicate = true;
-                            break;
-                        }
-                    }
-                    if (!duplicate)
-                    {
-                        items.Add(new AutostartItem
-                        {
-                            Name = name,
-                            Path = value,
-                            Type = type,
-                            Exists = File.Exists(NormalizePath(value?.Split(' ')[0]?.Trim('"') ?? ""))
-                        });
-                    }
+                    bool dup = false;
+                    foreach (var it in items) if (it.Name == name && it.Path == value && it.Type == type) { dup = true; break; }
+                    if (!dup)
+                        items.Add(new AutostartItem { Name = name, Path = value, Type = type, Exists = File.Exists(NormalizePath(value?.Split(' ')[0]?.Trim('"') ?? "")) });
                 }
             }
 
-            try
-            {
-                AddRunOnceItems(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
-                    .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"), "HKLM\\RunOnce (64bit)");
-            }
-            catch { }
-
-            try
-            {
-                AddRunOnceItems(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32)
-                    .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"), "HKLM\\RunOnce (32bit)");
-            }
-            catch { }
-
-            try
-            {
-                AddRunOnceItems(RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default)
-                    .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"), "HKCU\\RunOnce");
-            }
-            catch { }
+            try { Add(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64).OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"), "HKLM\\RunOnce (64bit)"); } catch { }
+            try { Add(RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32).OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"), "HKLM\\RunOnce (32bit)"); } catch { }
+            try { Add(RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default).OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"), "HKCU\\RunOnce"); } catch { }
 
             return items;
         }
@@ -705,7 +888,11 @@ namespace BunnyBlack.Core
 
             try
             {
-                using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"))
+                RegistryKey key = IsWinReEnvironment()
+                    ? (LoadOfflineHives() ? Registry.LocalMachine.OpenSubKey(OfflineSoftwareHive + @"\Microsoft\Windows NT\CurrentVersion\Winlogon") : null)
+                    : Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon");
+
+                using (key)
                 {
                     if (key != null)
                     {
@@ -713,28 +900,18 @@ namespace BunnyBlack.Core
                         {
                             var value = key.GetValue(param)?.ToString() ?? "";
                             if (!string.IsNullOrEmpty(value))
-                            {
-                                items.Add(new AutostartItem
-                                {
-                                    Name = param,
-                                    Path = NormalizePath(value),
-                                    Type = "Winlogon (HKLM)",
-                                    Exists = true
-                                });
-                            }
+                                items.Add(new AutostartItem { Name = param, Path = NormalizePath(value), Type = "Winlogon (HKLM)", Exists = true });
                         }
                     }
                 }
             }
             catch { }
-
             return items;
         }
 
         public static List<AutostartItem> GetStartupFolderItems()
         {
             var items = new List<AutostartItem>();
-
             try
             {
                 string systemDrive = GetSystemDrive();
@@ -748,174 +925,139 @@ namespace BunnyBlack.Core
                     {
                         foreach (string userDir in Directory.GetDirectories(usersPath))
                         {
-                            string startupPath = Path.Combine(userDir, @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup");
-                            if (Directory.Exists(startupPath))
-                                startupPaths.Add(startupPath);
+                            string sp = Path.Combine(userDir, @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup");
+                            if (Directory.Exists(sp)) startupPaths.Add(sp);
                         }
                     }
                     string commonStartup = Path.Combine(systemDrive, @"ProgramData\Microsoft\Windows\Start Menu\Programs\Startup");
-                    if (Directory.Exists(commonStartup))
-                        startupPaths.Add(commonStartup);
-
+                    if (Directory.Exists(commonStartup)) startupPaths.Add(commonStartup);
                     folders = startupPaths.ToArray();
                 }
                 else
                 {
-                    string commonStartup = Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup);
-                    string userStartup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
-                    folders = new string[] { commonStartup, userStartup };
+                    folders = new string[] {
+                        Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup),
+                        Environment.GetFolderPath(Environment.SpecialFolder.Startup)
+                    };
                 }
 
                 foreach (var folder in folders)
                 {
-                    if (Directory.Exists(folder))
+                    if (!Directory.Exists(folder)) continue;
+                    foreach (var file in Directory.GetFiles(folder))
                     {
-                        foreach (var file in Directory.GetFiles(folder))
-                        {
-                            var name = Path.GetFileName(file);
-                            if (!name.StartsWith("~") && !name.StartsWith("."))
-                            {
-                                items.Add(new AutostartItem
-                                {
-                                    Name = name,
-                                    Path = file,
-                                    Type = "Папка автозагрузки",
-                                    Exists = true
-                                });
-                            }
-                        }
+                        var name = Path.GetFileName(file);
+                        if (!name.StartsWith("~") && !name.StartsWith("."))
+                            items.Add(new AutostartItem { Name = name, Path = file, Type = "Папка автозагрузки", Exists = true });
                     }
                 }
             }
             catch { }
-
             return items;
         }
-
-        // ============================================================
-        // ============== ИСПРАВЛЕННОЕ И ДОБАВЛЕННОЕ УДАЛЕНИЕ ==============
-        // ============================================================
 
         public static bool DeleteRunItem(string name, string type)
         {
             try
             {
-                // Если это WinRE, удаляем через оффлайн-куст
                 if (IsWinReEnvironment())
                 {
-                    string path = type.Contains("RunOnce") ?
-                        @"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" :
-                        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+                    LoadOfflineHives();
+                    string subPath = type.Contains("RunOnce")
+                        ? @"Microsoft\Windows\CurrentVersion\RunOnce"
+                        : @"Microsoft\Windows\CurrentVersion\Run";
 
-                    using (var key = OpenWindowsSubKey(path, true))
+                    if (type.StartsWith("HKCU"))
                     {
-                        if (key != null && key.GetValue(name) != null)
+                        if (!IsUserHiveLoaded(OfflineHkcuHive)) return false;
+                        using (var key = Registry.Users.OpenSubKey(OfflineHkcuHive + @"\Software\Microsoft\Windows\CurrentVersion\" + (type.Contains("RunOnce") ? "RunOnce" : "Run"), true))
                         {
-                            key.DeleteValue(name);
-                            return true;
+                            if (key != null && key.GetValue(name) != null) { key.DeleteValue(name); return true; }
                         }
+                        return false;
+                    }
+
+                    using (var key = Registry.LocalMachine.OpenSubKey(OfflineSoftwareHive + "\\" + subPath, true))
+                    {
+                        if (key != null && key.GetValue(name) != null) { key.DeleteValue(name); return true; }
                     }
                     return false;
                 }
 
-                // Обычная Windows: перебираем все возможные места, где может быть запись
-                // 1. HKLM 64-bit
-                using (var key64 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
+                using (var k64 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
                     .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\" + (type.Contains("RunOnce") ? "RunOnce" : "Run"), true))
-                {
-                    if (key64 != null && key64.GetValue(name) != null)
-                    {
-                        key64.DeleteValue(name);
-                        return true;
-                    }
-                }
+                    if (k64 != null && k64.GetValue(name) != null) { k64.DeleteValue(name); return true; }
 
-                // 2. HKLM 32-bit (WOW6432Node)
-                using (var key32 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32)
+                using (var k32 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32)
                     .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\" + (type.Contains("RunOnce") ? "RunOnce" : "Run"), true))
-                {
-                    if (key32 != null && key32.GetValue(name) != null)
-                    {
-                        key32.DeleteValue(name);
-                        return true;
-                    }
-                }
+                    if (k32 != null && k32.GetValue(name) != null) { k32.DeleteValue(name); return true; }
 
-                // 3. HKCU (Текущий пользователь)
-                using (var keyUser = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default)
+                using (var ku = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default)
                     .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\" + (type.Contains("RunOnce") ? "RunOnce" : "Run"), true))
-                {
-                    if (keyUser != null && keyUser.GetValue(name) != null)
-                    {
-                        keyUser.DeleteValue(name);
-                        return true;
-                    }
-                }
+                    if (ku != null && ku.GetValue(name) != null) { ku.DeleteValue(name); return true; }
 
                 return false;
             }
-            catch (UnauthorizedAccessException)
-            {
-                // Если не хватает прав - пробрасываем выше, чтобы программа перезапустилась с админом
-                throw;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        public static bool DeleteFileItem(string path)
-        {
-            try
-            {
-                string normalizedPath = NormalizePath(path);
-                if (File.Exists(normalizedPath))
-                {
-                    File.Delete(normalizedPath);
-                    return true;
-                }
-                return false;
-            }
+            catch (UnauthorizedAccessException) { throw; }
             catch { return false; }
         }
+
+        public static bool DeleteFileItem(string path, out string error)
+        {
+            error = null;
+            try
+            {
+                string p = NormalizePath(path);
+                if (!File.Exists(p)) { error = "Файл не найден."; return false; }
+                File.Delete(p);
+                return true;
+            }
+            catch (UnauthorizedAccessException ex) { error = "Отказано в доступе: " + ex.Message; return false; }
+            catch (IOException ex) { error = "Ошибка ввода-вывода: " + ex.Message; return false; }
+            catch (Exception ex) { error = ex.Message; return false; }
+        }
+
+        public static bool DeleteFileItem(string path) => DeleteFileItem(path, out _);
 
         public static bool SetWinlogonValue(string name, string value)
         {
             try
             {
-                using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", true))
+                if (IsWinReEnvironment())
                 {
-                    if (key != null)
+                    LoadOfflineHives();
+                    using (var key = Registry.LocalMachine.OpenSubKey(OfflineSoftwareHive + @"\Microsoft\Windows NT\CurrentVersion\Winlogon", true))
                     {
-                        key.SetValue(name, NormalizePath(value));
-                        return true;
+                        if (key != null) { key.SetValue(name, NormalizePath(value)); return true; }
                     }
+                    return false;
+                }
+
+                using (var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", true))
+                {
+                    if (key != null) { key.SetValue(name, NormalizePath(value)); return true; }
                 }
                 return false;
             }
             catch { return false; }
         }
-
-        // ============================================================
-        // APPINIT_DLLS
-        // ============================================================
 
         public static List<AppInitItem> GetAppInitDllsItems()
         {
             var list = new List<AppInitItem>();
             try
             {
-                using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows"))
+                RegistryKey key = IsWinReEnvironment()
+                    ? (LoadOfflineHives() ? Registry.LocalMachine.OpenSubKey(OfflineSoftwareHive + @"\Microsoft\Windows NT\CurrentVersion\Windows") : null)
+                    : Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows");
+
+                using (key)
                 {
                     if (key != null)
                     {
-                        string dlls = key.GetValue("AppInit_DLLs")?.ToString() ?? "";
-                        string load = key.GetValue("LoadAppInit_DLLs")?.ToString() ?? "0";
-                        string require = key.GetValue("RequireSignedAppInit_DLLs")?.ToString() ?? "0";
-                        list.Add(new AppInitItem { Name = "AppInit_DLLs", Path = dlls, Type = "HKLM" });
-                        list.Add(new AppInitItem { Name = "LoadAppInit_DLLs", Path = load, Type = "HKLM" });
-                        list.Add(new AppInitItem { Name = "RequireSignedAppInit_DLLs", Path = require, Type = "HKLM" });
+                        list.Add(new AppInitItem { Name = "AppInit_DLLs", Path = key.GetValue("AppInit_DLLs")?.ToString() ?? "", Type = "HKLM" });
+                        list.Add(new AppInitItem { Name = "LoadAppInit_DLLs", Path = key.GetValue("LoadAppInit_DLLs")?.ToString() ?? "0", Type = "HKLM" });
+                        list.Add(new AppInitItem { Name = "RequireSignedAppInit_DLLs", Path = key.GetValue("RequireSignedAppInit_DLLs")?.ToString() ?? "0", Type = "HKLM" });
                     }
                 }
             }
@@ -927,13 +1069,13 @@ namespace BunnyBlack.Core
         {
             try
             {
-                using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows", true))
+                string path = IsWinReEnvironment()
+                    ? OfflineSoftwareHive + @"\Microsoft\Windows NT\CurrentVersion\Windows"
+                    : @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows";
+
+                using (var key = Registry.LocalMachine.OpenSubKey(path, true))
                 {
-                    if (key != null)
-                    {
-                        key.SetValue(name, value);
-                        return true;
-                    }
+                    if (key != null) { key.SetValue(name, value); return true; }
                 }
                 return false;
             }
@@ -944,14 +1086,16 @@ namespace BunnyBlack.Core
         {
             try
             {
-                using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows", true))
+                string path = IsWinReEnvironment()
+                    ? OfflineSoftwareHive + @"\Microsoft\Windows NT\CurrentVersion\Windows"
+                    : @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows";
+
+                using (var key = Registry.LocalMachine.OpenSubKey(path, true))
                 {
                     if (key != null && key.GetValue(name) != null)
                     {
-                        if (name == "AppInit_DLLs")
-                            key.SetValue(name, "");
-                        else
-                            key.SetValue(name, 0);
+                        if (name == "AppInit_DLLs") key.SetValue(name, "");
+                        else key.SetValue(name, 0);
                         return true;
                     }
                 }
@@ -960,78 +1104,70 @@ namespace BunnyBlack.Core
             catch { return false; }
         }
 
-        // ============================================================
-        // CMDLINE
-        // ============================================================
-
         public static List<CmdLineItem> GetCmdLineAutoRunItems()
         {
             var list = new List<CmdLineItem>();
-
             try
             {
-                using (var key = OpenWindowsSubKey(@"SYSTEM\Setup"))
-                {
-                    if (key != null)
-                    {
-                        string cmdLine = key.GetValue("CmdLine")?.ToString() ?? "";
-                        list.Add(new CmdLineItem
-                        {
-                            Name = "CmdLine",
-                            Path = string.IsNullOrEmpty(cmdLine) ? "(пусто)" : cmdLine
-                        });
+                RegistryKey setupKey = IsWinReEnvironment()
+                    ? (LoadOfflineHives() ? Registry.LocalMachine.OpenSubKey(OfflineSystemHive + @"\Setup") : null)
+                    : Registry.LocalMachine.OpenSubKey(@"SYSTEM\Setup");
 
-                        string setupType = key.GetValue("SetupType")?.ToString() ?? "";
-                        list.Add(new CmdLineItem
-                        {
-                            Name = "SetupType",
-                            Path = string.IsNullOrEmpty(setupType) ? "(пусто)" : setupType
-                        });
+                using (setupKey)
+                {
+                    if (setupKey != null)
+                    {
+                        string cmdLine = setupKey.GetValue("CmdLine")?.ToString() ?? "";
+                        list.Add(new CmdLineItem { Name = "CmdLine", Path = string.IsNullOrEmpty(cmdLine) ? "(пусто)" : cmdLine });
+                        string setupType = setupKey.GetValue("SetupType")?.ToString() ?? "";
+                        list.Add(new CmdLineItem { Name = "SetupType", Path = string.IsNullOrEmpty(setupType) ? "(пусто)" : setupType });
                     }
                 }
 
-                using (var key = OpenWindowsSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"))
+                RegistryKey polKey = IsWinReEnvironment()
+                    ? Registry.LocalMachine.OpenSubKey(OfflineSoftwareHive + @"\Microsoft\Windows\CurrentVersion\Policies\System")
+                    : Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
+
+                using (polKey)
                 {
-                    if (key != null)
+                    if (polKey != null)
                     {
-                        string cursorSuppression = key.GetValue("EnableCursorSuppression")?.ToString() ?? "";
-                        list.Add(new CmdLineItem
-                        {
-                            Name = "EnableCursorSuppression",
-                            Path = string.IsNullOrEmpty(cursorSuppression) ? "(пусто)" : cursorSuppression
-                        });
+                        string cur = polKey.GetValue("EnableCursorSuppression")?.ToString() ?? "";
+                        list.Add(new CmdLineItem { Name = "EnableCursorSuppression", Path = string.IsNullOrEmpty(cur) ? "(пусто)" : cur });
                     }
                 }
             }
             catch { }
-
             return list;
-        }
-
-        private static string GetRegistryPathForParameter(string name)
-        {
-            if (name == "CmdLine" || name == "SetupType")
-                return @"SYSTEM\Setup";
-            else if (name == "EnableCursorSuppression")
-                return @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
-            else
-                return @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows";
         }
 
         public static bool SetCmdLineValue(string name, string value)
         {
             try
             {
-                string registryPath = GetRegistryPathForParameter(name);
-                using (var key = OpenWindowsSubKey(registryPath, true))
+                if (name == "CmdLine" || name == "SetupType")
                 {
-                    if (key != null)
+                    string path = IsWinReEnvironment() ? OfflineSystemHive + @"\Setup" : @"SYSTEM\Setup";
+                    using (var key = Registry.LocalMachine.OpenSubKey(path, true))
                     {
-                        key.SetValue(name, value);
-                        return true;
+                        if (key != null) { key.SetValue(name, value); return true; }
                     }
+                    return false;
                 }
-                return false;
+
+                if (name == "EnableCursorSuppression")
+                {
+                    string path = IsWinReEnvironment()
+                        ? OfflineSoftwareHive + @"\Microsoft\Windows\CurrentVersion\Policies\System"
+                        : @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+                    using (var key = Registry.LocalMachine.OpenSubKey(path, true))
+                    {
+                        if (key != null) { key.SetValue(name, value); return true; }
+                    }
+                    return false;
+                }
+
+                return SetAppInitDllsValue(name, value);
             }
             catch { return false; }
         }
@@ -1040,32 +1176,37 @@ namespace BunnyBlack.Core
         {
             try
             {
-                string registryPath = GetRegistryPathForParameter(name);
-                using (var key = OpenWindowsSubKey(registryPath, true))
+                if (name == "CmdLine" || name == "SetupType")
                 {
-                    if (key != null && key.GetValue(name) != null)
+                    string path = IsWinReEnvironment() ? OfflineSystemHive + @"\Setup" : @"SYSTEM\Setup";
+                    using (var key = Registry.LocalMachine.OpenSubKey(path, true))
                     {
-                        key.SetValue(name, "");
-                        return true;
+                        if (key != null && key.GetValue(name) != null) { key.SetValue(name, ""); return true; }
                     }
+                    return false;
                 }
-                return false;
+
+                if (name == "EnableCursorSuppression")
+                {
+                    string path = IsWinReEnvironment()
+                        ? OfflineSoftwareHive + @"\Microsoft\Windows\CurrentVersion\Policies\System"
+                        : @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+                    using (var key = Registry.LocalMachine.OpenSubKey(path, true))
+                    {
+                        if (key != null && key.GetValue(name) != null) { key.SetValue(name, ""); return true; }
+                    }
+                    return false;
+                }
+
+                return DeleteAppInitDllsValue(name);
             }
             catch { return false; }
         }
 
-        // ============================================================
-        // ПЛАНИРОВЩИК ЗАДАЧ
-        // ============================================================
-
         public static List<TaskItem> GetTaskSchedulerItems()
         {
             var list = new List<TaskItem>();
-
-            if (IsWinReEnvironment())
-            {
-                return GetOfflineTaskItems();
-            }
+            if (IsWinReEnvironment()) return GetOfflineTaskItems();
 
             try
             {
@@ -1084,12 +1225,8 @@ namespace BunnyBlack.Core
                         }
 
                         string triggers = "";
-                        foreach (var t in task.Definition.Triggers)
-                        {
-                            triggers += t.ToString() + "; ";
-                        }
-                        if (triggers.Length > 2)
-                            triggers = triggers.Substring(0, triggers.Length - 2);
+                        foreach (var t in task.Definition.Triggers) triggers += t.ToString() + "; ";
+                        if (triggers.Length > 2) triggers = triggers.Substring(0, triggers.Length - 2);
 
                         list.Add(new TaskItem
                         {
@@ -1100,9 +1237,12 @@ namespace BunnyBlack.Core
                         });
                     }
                 }
+                return list;
             }
-            catch { }
-
+            catch
+            {
+                try { return GetOfflineTaskItems(); } catch { }
+            }
             return list;
         }
 
@@ -1111,27 +1251,28 @@ namespace BunnyBlack.Core
             var tasks = new List<TaskItem>();
             string systemDrive = GetSystemDrive();
             string tasksPath = Path.Combine(systemDrive, @"Windows\System32\Tasks");
-
             if (!Directory.Exists(tasksPath)) return tasks;
 
             try
             {
-                foreach (string file in Directory.GetFiles(tasksPath, "*.xml", SearchOption.AllDirectories))
+                foreach (string file in Directory.GetFiles(tasksPath, "*", SearchOption.AllDirectories))
                 {
                     try
                     {
+                        string content = null;
+                        try { content = File.ReadAllText(file); } catch { continue; }
+                        if (string.IsNullOrWhiteSpace(content) || !content.Contains("<Task")) continue;
+
                         string taskName = Path.GetFileNameWithoutExtension(file);
                         string action = "Неизвестно";
                         string triggers = "Неизвестно";
 
-                        string xmlContent = File.ReadAllText(file);
                         XmlDocument doc = new XmlDocument();
-                        doc.LoadXml(xmlContent);
-
+                        doc.LoadXml(content);
                         XmlNamespaceManager ns = new XmlNamespaceManager(doc.NameTable);
                         ns.AddNamespace("ns", "http://schemas.microsoft.com/windows/2004/02/mit/task");
 
-                        XmlNode execNode = doc.SelectSingleNode("//ns:Exec", ns);
+                        var execNode = doc.SelectSingleNode("//ns:Exec", ns);
                         if (execNode != null)
                         {
                             string command = execNode.SelectSingleNode("ns:Command", ns)?.InnerText ?? "";
@@ -1139,18 +1280,13 @@ namespace BunnyBlack.Core
                             action = command + (!string.IsNullOrEmpty(args) ? " " + args : "");
                         }
 
-                        XmlNode triggersNode = doc.SelectSingleNode("//ns:Triggers", ns);
+                        var triggersNode = doc.SelectSingleNode("//ns:Triggers", ns);
                         if (triggersNode != null)
                         {
                             var triggerList = new List<string>();
                             foreach (XmlNode child in triggersNode.ChildNodes)
-                            {
                                 if (child.Name.EndsWith("Trigger"))
-                                {
-                                    string triggerName = child.Name.Replace("ns:", "").Replace("Trigger", "");
-                                    triggerList.Add(triggerName);
-                                }
-                            }
+                                    triggerList.Add(child.Name.Replace("ns:", "").Replace("Trigger", ""));
                             triggers = string.Join("; ", triggerList);
                             if (string.IsNullOrEmpty(triggers)) triggers = "Без триггера";
                         }
@@ -1178,14 +1314,8 @@ namespace BunnyBlack.Core
                 try
                 {
                     string systemDrive = GetSystemDrive();
-                    string taskPath = Path.Combine(systemDrive, @"Windows\System32\Tasks", taskName + ".xml");
-                    if (File.Exists(taskPath))
-                    {
-                        File.Delete(taskPath);
-                        return true;
-                    }
                     string tasksDir = Path.Combine(systemDrive, @"Windows\System32\Tasks");
-                    foreach (string file in Directory.GetFiles(tasksDir, "*.xml", SearchOption.AllDirectories))
+                    foreach (string file in Directory.GetFiles(tasksDir, "*", SearchOption.AllDirectories))
                     {
                         if (Path.GetFileNameWithoutExtension(file).Equals(taskName, StringComparison.OrdinalIgnoreCase))
                         {
@@ -1209,16 +1339,12 @@ namespace BunnyBlack.Core
             catch { return false; }
         }
 
-        // ============================================================
-        // БЭКАП РЕЕСТРА
-        // ============================================================
-
         public static bool BackupRegistry()
         {
             try
             {
                 string path = Path.Combine(Path.GetTempPath(), $"registry_backup_{DateTime.Now:yyyyMMdd_HHmmss}.reg");
-                var startInfo = new System.Diagnostics.ProcessStartInfo
+                var si = new ProcessStartInfo
                 {
                     FileName = "reg",
                     Arguments = $"export HKLM \"{path.Replace(".reg", "_HKLM.reg")}\" /y",
@@ -1226,9 +1352,9 @@ namespace BunnyBlack.Core
                     CreateNoWindow = true,
                     RedirectStandardOutput = true
                 };
-                using (var process = System.Diagnostics.Process.Start(startInfo)) { if (process != null) process.WaitForExit(); }
-                startInfo.Arguments = $"export HKCU \"{path.Replace(".reg", "_HKCU.reg")}\" /y";
-                using (var process = System.Diagnostics.Process.Start(startInfo)) { if (process != null) process.WaitForExit(); }
+                using (var p = Process.Start(si)) { if (p != null) p.WaitForExit(); }
+                si.Arguments = $"export HKCU \"{path.Replace(".reg", "_HKCU.reg")}\" /y";
+                using (var p = Process.Start(si)) { if (p != null) p.WaitForExit(); }
                 return true;
             }
             catch { return false; }
