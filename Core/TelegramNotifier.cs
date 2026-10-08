@@ -15,8 +15,8 @@ namespace BunnyBlack.Core
         // ============================================================
         // НАСТРОЙКА
         // ============================================================
-        private const string BotToken = "8832885464:AAHdP2lAlZ-kqQoKgg7DDGHdphz9aKnsiI0";
-        private const string ChatId = "-5389684165";
+        private const string BotToken = "";
+        private const string ChatId = "";
 
         private const int HttpTimeoutSec = 10;
 
