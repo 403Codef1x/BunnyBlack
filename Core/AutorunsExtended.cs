@@ -1,11 +1,15 @@
 ﻿// language: C#, file: Core/AutorunsExtended.cs
-// Расширенный сбор автозапусков: COM CLSID, LSA, Print Monitors, BootExecute,
-// KnownDLLs, Winlogon Notify, ShellServiceObjectDelayLoad, SharedTaskScheduler,
-// AppCertDlls, AppPaths, WSH-хуки, Explorer-расширения и т.д.
+// Полная замена.
+// п.4  — добавлены поля: FileExists, Signed, CreatedAt, ModifiedAt, StatusReason.
+// п.12 — эвристика свежести (Created < 7 дней).
+// п.20 — расширенный Winlogon (Shell, Userinit, Taskman, System, AppSetup, GinaDLL, UIHost, VmApplet).
+// п.28 — BootExecute, KnownDLLs, AppCertDlls, LSA Notification Packages.
+// IFEO — только Debugger.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using Microsoft.Win32;
 
 namespace BunnyBlack.Core
@@ -21,6 +25,15 @@ namespace BunnyBlack.Core
         public bool FileExists { get; set; }
         public bool Suspicious { get; set; }
         public string SuspicionReason { get; set; }
+
+        // п.4 — новые поля
+        public bool Signed { get; set; }
+        public DateTime? CreatedAt { get; set; }
+        public DateTime? ModifiedAt { get; set; }
+
+        // п.12 — вычисляется в MarkSuspicious
+        public bool FreshFile { get; set; }
+        public int AgeDays { get; set; }
     }
 
     public static class AutorunsExtended
@@ -33,27 +46,28 @@ namespace BunnyBlack.Core
         };
 
         // ============================================================
-        // СВОД: пройти все ветки, вернуть единый список
+        // СВОД
         // ============================================================
         public static List<AutorunEntry> Collect(bool offline = false)
         {
             var list = new List<AutorunEntry>();
 
-            try { CollectRunKeys(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectWinlogonExtra(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectComClsid(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectLsaProviders(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectPrintMonitors(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectBootExecute(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectKnownDlls(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectShellServiceObject(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectSharedTaskScheduler(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectAppCertDlls(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectAppPaths(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectExplorerExtensions(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectWshHooks(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectBrowserHelpers(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
-            try { CollectKnownSuspicious(list, offline); } catch (Exception e) { Debug.WriteLine(e.Message); }
+            try { CollectRunKeys(list, offline); } catch (Exception e) { BbLog.Error("[CollectRunKeys]", e); }
+            try { CollectWinlogonExtended(list, offline); } catch (Exception e) { BbLog.Error("[Winlogon]", e); }
+            try { CollectComClsid(list, offline); } catch (Exception e) { BbLog.Error("[ComClsid]", e); }
+            try { CollectLsaProviders(list, offline); } catch (Exception e) { BbLog.Error("[Lsa]", e); }
+            try { CollectPrintMonitors(list, offline); } catch (Exception e) { BbLog.Error("[Print]", e); }
+            try { CollectBootExecute(list, offline); } catch (Exception e) { BbLog.Error("[BootExec]", e); }
+            try { CollectKnownDlls(list, offline); } catch (Exception e) { BbLog.Error("[KnownDLLs]", e); }
+            try { CollectAppCertDlls(list, offline); } catch (Exception e) { BbLog.Error("[AppCert]", e); }
+            try { CollectLsaNotificationPackages(list, offline); } catch (Exception e) { BbLog.Error("[LsaNotify]", e); }
+            try { CollectShellServiceObject(list, offline); } catch (Exception e) { BbLog.Error("[ShellService]", e); }
+            try { CollectSharedTaskScheduler(list, offline); } catch (Exception e) { BbLog.Error("[SharedTask]", e); }
+            try { CollectAppPaths(list, offline); } catch (Exception e) { BbLog.Error("[AppPaths]", e); }
+            try { CollectExplorerExtensions(list, offline); } catch (Exception e) { BbLog.Error("[ShellHooks]", e); }
+            try { CollectWshHooks(list, offline); } catch (Exception e) { BbLog.Error("[WSH]", e); }
+            try { CollectBrowserHelpers(list, offline); } catch (Exception e) { BbLog.Error("[BHO]", e); }
+            try { CollectIfeo(list, offline); } catch (Exception e) { BbLog.Error("[IFEO]", e); }
 
             // эвристика
             foreach (var e in list) MarkSuspicious(e);
@@ -61,11 +75,12 @@ namespace BunnyBlack.Core
         }
 
         // ============================================================
-        // RUN / RUNONCE (сохранено как было + добавлено расширение)
+        // RUN / RUNONCE
         // ============================================================
         private static void CollectRunKeys(List<AutorunEntry> list, bool offline)
         {
-            string[] subs = {
+            string[] subs =
+            {
                 @"Microsoft\Windows\CurrentVersion\Run",
                 @"Microsoft\Windows\CurrentVersion\RunOnce",
                 @"Microsoft\Windows\CurrentVersion\RunServices",
@@ -75,25 +90,24 @@ namespace BunnyBlack.Core
             };
 
             foreach (var sub in subs)
-            {
                 ScanHive(list, offline, "SOFTWARE", sub, "Run");
-            }
         }
 
-        private static void CollectWinlogonExtra(List<AutorunEntry> list, bool offline)
+        // ============================================================
+        // п.20 — WINLOGON расширенный
+        // ============================================================
+        private static void CollectWinlogonExtended(List<AutorunEntry> list, bool offline)
         {
-            string[] subs = {
-                @"Microsoft\Windows NT\CurrentVersion\Winlogon"
+            const string sub = @"Microsoft\Windows NT\CurrentVersion\Winlogon";
+
+            string[] values =
+            {
+                "Shell", "Userinit", "Taskman", "System",
+                "AppSetup", "VmApplet", "GinaDLL", "UIHost",
+                "AlternateShell", "AutoAdminLogon", "DefaultUserName"
             };
 
-            foreach (var sub in subs)
-            {
-                ScanHive(list, offline, "SOFTWARE", sub, "Winlogon", specificValues: new[]
-                {
-                    "Shell", "Userinit", "Taskman", "System",
-                    "AppSetup", "VmApplet", "GinaDLL", "UIHost"
-                });
-            }
+            ScanHive(list, offline, "SOFTWARE", sub, "Winlogon", specificValues: values);
 
             // Winlogon\Notify
             ScanHive(list, offline, "SOFTWARE",
@@ -101,7 +115,170 @@ namespace BunnyBlack.Core
         }
 
         // ============================================================
-        // COM CLSID — заражение объектов
+        // IFEO — Image File Execution Options. Только Debugger.
+        // ============================================================
+        private static void CollectIfeo(List<AutorunEntry> list, bool offline)
+        {
+            const string sub = @"Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
+
+            try
+            {
+                using (var key = OpenHive(offline, "SOFTWARE", sub))
+                {
+                    if (key == null) return;
+
+                    foreach (var subName in key.GetSubKeyNames())
+                    {
+                        try
+                        {
+                            using (var subKey = key.OpenSubKey(subName))
+                            {
+                                if (subKey == null) continue;
+                                string debugger = subKey.GetValue("Debugger")?.ToString() ?? "";
+                                if (string.IsNullOrWhiteSpace(debugger)) continue;
+
+                                list.Add(MakeEntry(
+                                    "IFEO Debugger",
+                                    subName + " → Debugger",
+                                    debugger,
+                                    offline, "SOFTWARE",
+                                    sub + "\\" + subName,
+                                    "Debugger"));
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch (Exception ex) { BbLog.Error("[CollectIfeo]", ex); }
+        }
+
+        // ============================================================
+        // п.28 — BOOT EXECUTE
+        // ============================================================
+        private static void CollectBootExecute(List<AutorunEntry> list, bool offline)
+        {
+            const string sub = @"ControlSet001\Control\Session Manager";
+
+            try
+            {
+                using (var key = OpenHive(offline, "SYSTEM", sub))
+                {
+                    if (key == null) return;
+
+                    object boot = key.GetValue("BootExecute");
+                    if (boot is string[] arr)
+                    {
+                        foreach (var s in arr)
+                        {
+                            if (string.IsNullOrWhiteSpace(s)) continue;
+                            list.Add(MakeEntry("BootExecute", "BootExecute", s, offline, "SYSTEM", sub, "BootExecute"));
+                        }
+                    }
+                    else if (boot is string str && !string.IsNullOrWhiteSpace(str))
+                    {
+                        list.Add(MakeEntry("BootExecute", "BootExecute", str, offline, "SYSTEM", sub, "BootExecute"));
+                    }
+                }
+            }
+            catch (Exception ex) { BbLog.Error("[CollectBootExecute]", ex); }
+        }
+
+        // ============================================================
+        // п.28 — KNOWN DLLS
+        // ============================================================
+        private static void CollectKnownDlls(List<AutorunEntry> list, bool offline)
+        {
+            const string sub = @"ControlSet001\Control\Session Manager\KnownDLLs";
+
+            try
+            {
+                using (var key = OpenHive(offline, "SYSTEM", sub))
+                {
+                    if (key == null) return;
+
+                    foreach (var name in key.GetValueNames())
+                    {
+                        string val = key.GetValue(name)?.ToString() ?? "";
+                        if (string.IsNullOrWhiteSpace(val)) continue;
+
+                        bool unusual = val.Contains("\\") || val.Contains("/") || val.Contains(":");
+
+                        var e = MakeEntry("KnownDLL", name, val, offline, "SYSTEM", sub, name);
+                        if (unusual)
+                        {
+                            e.Suspicious = true;
+                            e.SuspicionReason = "KnownDLL содержит путь вместо имени — подмена системной DLL";
+                        }
+                        list.Add(e);
+                    }
+                }
+            }
+            catch (Exception ex) { BbLog.Error("[CollectKnownDlls]", ex); }
+        }
+
+        // ============================================================
+        // п.28 — APP CERT DLLS
+        // ============================================================
+        private static void CollectAppCertDlls(List<AutorunEntry> list, bool offline)
+        {
+            const string sub = @"ControlSet001\Control\Session Manager\AppCertDlls";
+
+            try
+            {
+                using (var key = OpenHive(offline, "SYSTEM", sub))
+                {
+                    if (key == null) return;
+
+                    foreach (var name in key.GetValueNames())
+                    {
+                        string val = key.GetValue(name)?.ToString() ?? "";
+                        if (string.IsNullOrWhiteSpace(val)) continue;
+                        list.Add(MakeEntry("AppCertDll", name, val, offline, "SYSTEM", sub, name));
+                    }
+                }
+            }
+            catch (Exception ex) { BbLog.Error("[CollectAppCertDlls]", ex); }
+        }
+
+        // ============================================================
+        // п.28 — LSA NOTIFICATION PACKAGES
+        // ============================================================
+        private static void CollectLsaNotificationPackages(List<AutorunEntry> list, bool offline)
+        {
+            const string sub = @"ControlSet001\Control\Lsa";
+
+            try
+            {
+                using (var key = OpenHive(offline, "SYSTEM", sub))
+                {
+                    if (key == null) return;
+
+                    string[] pkgs = { "Notification Packages", "Authentication Packages", "Security Packages" };
+
+                    foreach (var pkgName in pkgs)
+                    {
+                        object val = key.GetValue(pkgName);
+                        if (val is string[] arr)
+                        {
+                            foreach (var s in arr)
+                            {
+                                if (string.IsNullOrWhiteSpace(s)) continue;
+                                list.Add(MakeEntry("LSA Package", pkgName, s, offline, "SYSTEM", sub, pkgName));
+                            }
+                        }
+                        else if (val is string str && !string.IsNullOrWhiteSpace(str))
+                        {
+                            list.Add(MakeEntry("LSA Package", pkgName, str, offline, "SYSTEM", sub, pkgName));
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { BbLog.Error("[CollectLsaNotificationPackages]", ex); }
+        }
+
+        // ============================================================
+        // COM CLSID
         // ============================================================
         private static void CollectComClsid(List<AutorunEntry> list, bool offline)
         {
@@ -122,6 +299,11 @@ namespace BunnyBlack.Core
                                 string def = inproc.GetValue("")?.ToString() ?? "";
                                 if (string.IsNullOrWhiteSpace(def)) continue;
 
+                                string lower = def.ToLowerInvariant();
+                                if (lower.Contains(@"\windows\system32\")) continue;
+                                if (lower.Contains(@"\windows\syswow64\")) continue;
+                                if (lower.Contains(@"\windows\winsxs\")) continue;
+
                                 string shortClsid = clsid.Length > 38 ? clsid.Substring(0, 38) : clsid;
                                 list.Add(MakeEntry("COM CLSID", shortClsid, def, offline, "SOFTWARE",
                                     sub + "\\" + clsid + "\\InprocServer32", ""));
@@ -131,42 +313,15 @@ namespace BunnyBlack.Core
                     }
                 }
             }
-            catch (Exception ex) { Debug.WriteLine("[CollectComClsid] " + ex.Message); }
+            catch (Exception ex) { BbLog.Error("[CollectComClsid]", ex); }
         }
 
         // ============================================================
-        // LSA AUTHENTICATION PACKAGES
+        // LSA PACKAGES (старый метод — оставлен для совместимости)
         // ============================================================
         private static void CollectLsaProviders(List<AutorunEntry> list, bool offline)
         {
-            string[] subPaths = {
-                @"ControlSet001\Control\Lsa\Authentication Packages",
-                @"ControlSet001\Control\Lsa\Notification Packages",
-                @"ControlSet001\Control\Lsa\Security Packages",
-                @"ControlSet001\Control\Lsa\OSConfig"
-            };
-
-            foreach (var p in subPaths)
-            {
-                try
-                {
-                    using (var key = OpenHive(offline, "SYSTEM", p))
-                    {
-                        if (key == null) continue;
-                        object def = key.GetValue("");
-                        if (def is string[] arr)
-                        {
-                            foreach (var s in arr)
-                                list.Add(MakeEntry("LSA Provider", p, s, offline, "SYSTEM", p, ""));
-                        }
-                        else if (def is string str)
-                        {
-                            list.Add(MakeEntry("LSA Provider", p, str, offline, "SYSTEM", p, ""));
-                        }
-                    }
-                }
-                catch { }
-            }
+            // теперь реализовано в CollectLsaNotificationPackages
         }
 
         // ============================================================
@@ -196,53 +351,11 @@ namespace BunnyBlack.Core
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { BbLog.Error("[CollectPrintMonitors]", ex); }
         }
 
         // ============================================================
-        // BOOT EXECUTE
-        // ============================================================
-        private static void CollectBootExecute(List<AutorunEntry> list, bool offline)
-        {
-            string sub = @"ControlSet001\Control\Session Manager";
-            try
-            {
-                using (var key = OpenHive(offline, "SYSTEM", sub))
-                {
-                    if (key == null) return;
-                    var boot = key.GetValue("BootExecute");
-                    if (boot is string[] arr)
-                        foreach (var s in arr)
-                            list.Add(MakeEntry("BootExecute", "BootExecute", s, offline, "SYSTEM", sub, "BootExecute"));
-                }
-            }
-            catch { }
-        }
-
-        // ============================================================
-        // KNOWN DLLS
-        // ============================================================
-        private static void CollectKnownDlls(List<AutorunEntry> list, bool offline)
-        {
-            string sub = @"ControlSet001\Control\Session Manager\KnownDLLs";
-            try
-            {
-                using (var key = OpenHive(offline, "SYSTEM", sub))
-                {
-                    if (key == null) return;
-                    foreach (var name in key.GetValueNames())
-                    {
-                        string val = key.GetValue(name)?.ToString() ?? "";
-                        if (val.Contains("\\") || val.Contains("/") || val.Contains(":"))
-                            list.Add(MakeEntry("KnownDLL", name, val, offline, "SYSTEM", sub, name));
-                    }
-                }
-            }
-            catch { }
-        }
-
-        // ============================================================
-        // SHELL SERVICE OBJECT DELAY LOAD
+        // SHELL SERVICE OBJECT DELAY LOAD / SHARED TASK / SHELL EXEC HOOKS
         // ============================================================
         private static void CollectShellServiceObject(List<AutorunEntry> list, bool offline)
         {
@@ -262,9 +375,6 @@ namespace BunnyBlack.Core
             catch { }
         }
 
-        // ============================================================
-        // SHARED TASK SCHEDULER
-        // ============================================================
         private static void CollectSharedTaskScheduler(List<AutorunEntry> list, bool offline)
         {
             string sub = @"Microsoft\Windows\CurrentVersion\Explorer\SharedTaskScheduler";
@@ -283,60 +393,6 @@ namespace BunnyBlack.Core
             catch { }
         }
 
-        // ============================================================
-        // APP CERT DLLS
-        // ============================================================
-        private static void CollectAppCertDlls(List<AutorunEntry> list, bool offline)
-        {
-            string sub = @"ControlSet001\Control\Session Manager\AppCertDlls";
-            try
-            {
-                using (var key = OpenHive(offline, "SYSTEM", sub))
-                {
-                    if (key == null) return;
-                    foreach (var name in key.GetValueNames())
-                    {
-                        string val = key.GetValue(name)?.ToString() ?? "";
-                        list.Add(MakeEntry("AppCertDll", name, val, offline, "SYSTEM", sub, name));
-                    }
-                }
-            }
-            catch { }
-        }
-
-        // ============================================================
-        // APP PATHS (подмена exe)
-        // ============================================================
-        private static void CollectAppPaths(List<AutorunEntry> list, bool offline)
-        {
-            string sub = @"Microsoft\Windows\CurrentVersion\App Paths";
-            try
-            {
-                using (var key = OpenHive(offline, "SOFTWARE", sub))
-                {
-                    if (key == null) return;
-                    foreach (var exe in key.GetSubKeyNames())
-                    {
-                        try
-                        {
-                            using (var ek = key.OpenSubKey(exe))
-                            {
-                                string def = ek?.GetValue("")?.ToString() ?? "";
-                                if (!string.IsNullOrEmpty(def))
-                                    list.Add(MakeEntry("AppPath", exe, def, offline, "SOFTWARE",
-                                        sub + "\\" + exe, ""));
-                            }
-                        }
-                        catch { }
-                    }
-                }
-            }
-            catch { }
-        }
-
-        // ============================================================
-        // EXPLORER EXTENSIONS / SHELL EXT
-        // ============================================================
         private static void CollectExplorerExtensions(List<AutorunEntry> list, bool offline)
         {
             string sub = @"Microsoft\Windows\CurrentVersion\Explorer\ShellExecuteHooks";
@@ -356,14 +412,52 @@ namespace BunnyBlack.Core
         }
 
         // ============================================================
-        // WSH — Windows Script Host
+        // APP PATHS
+        // ============================================================
+        private static void CollectAppPaths(List<AutorunEntry> list, bool offline)
+        {
+            string sub = @"Microsoft\Windows\CurrentVersion\App Paths";
+            try
+            {
+                using (var key = OpenHive(offline, "SOFTWARE", sub))
+                {
+                    if (key == null) return;
+                    foreach (var exe in key.GetSubKeyNames())
+                    {
+                        try
+                        {
+                            using (var ek = key.OpenSubKey(exe))
+                            {
+                                string def = ek?.GetValue("")?.ToString() ?? "";
+                                if (!string.IsNullOrEmpty(def))
+                                {
+                                    string lower = def.ToLowerInvariant();
+                                    if (lower.Contains(@"\program files\common files\system\")) continue;
+                                    if (lower.Contains(@"\windows\system32\")) continue;
+                                    if (lower.Contains(@"\windows\syswow64\")) continue;
+
+                                    list.Add(MakeEntry("AppPath", exe, def, offline, "SOFTWARE",
+                                        sub + "\\" + exe, ""));
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // ============================================================
+        // WSH / BHO
         // ============================================================
         private static void CollectWshHooks(List<AutorunEntry> list, bool offline)
         {
-            string[] subs = {
+            string[] subs =
+            {
                 @"Microsoft\Windows Script Host\Settings",
-                @"Classes\CLSID\{72C24DD5-D70A-438B-8A42-98424B88AFB8}\InprocServer32", // WScript.Shell
-                @"Classes\CLSID\{F935DC22-1CF0-11D0-ADB9-00C04FD58A0B}\InprocServer32"  // WScript.Network
+                @"Classes\CLSID\{72C24DD5-D70A-438B-8A42-98424B88AFB8}\InprocServer32",
+                @"Classes\CLSID\{F935DC22-1CF0-11D0-ADB9-00C04FD58A0B}\InprocServer32"
             };
 
             foreach (var sub in subs)
@@ -384,9 +478,6 @@ namespace BunnyBlack.Core
             }
         }
 
-        // ============================================================
-        // BROWSER HELPER OBJECTS
-        // ============================================================
         private static void CollectBrowserHelpers(List<AutorunEntry> list, bool offline)
         {
             string sub = @"Microsoft\Windows\CurrentVersion\Explorer\Browser Helper Objects";
@@ -403,41 +494,15 @@ namespace BunnyBlack.Core
         }
 
         // ============================================================
-        // KNOWN SUSPICIOUS KEYS
-        // ============================================================
-        private static void CollectKnownSuspicious(List<AutorunEntry> list, bool offline)
-        {
-            // Office addins, Outlook, Exchange
-            string[] subs = {
-                @"Microsoft\Office\Outlook\Addins",
-                @"Microsoft\Office\Excel\Addins",
-                @"Microsoft\Office\Word\Addins"
-            };
-
-            foreach (var sub in subs)
-            {
-                try
-                {
-                    using (var key = OpenHive(offline, "SOFTWARE", sub))
-                    {
-                        if (key == null) continue;
-                        foreach (var name in key.GetSubKeyNames())
-                            list.Add(MakeEntry("Office Addin", name, "", offline, "SOFTWARE",
-                                sub + "\\" + name, ""));
-                    }
-                }
-                catch { }
-            }
-        }
-
-        // ============================================================
         // ВНУТРЕННИЕ ХЕЛПЕРЫ
         // ============================================================
         private static AutorunEntry MakeEntry(string category, string name, string path,
             bool offline, string hive, string keyPath, string valueName)
         {
             string cleanPath = ExtractPath(path);
-            return new AutorunEntry
+            string normalizedPath = NormalizeToLive(cleanPath);
+
+            var e = new AutorunEntry
             {
                 Category = category,
                 Name = name,
@@ -445,8 +510,27 @@ namespace BunnyBlack.Core
                 Hive = hive,
                 KeyPath = keyPath,
                 ValueName = valueName,
-                FileExists = !string.IsNullOrEmpty(cleanPath) && File.Exists(NormalizeToLive(cleanPath)),
+                FileExists = !string.IsNullOrEmpty(normalizedPath) && File.Exists(normalizedPath)
             };
+
+            if (e.FileExists)
+            {
+                try
+                {
+                    e.Signed = Heuristics.IsSigned(normalizedPath);
+
+                    var fi = new FileInfo(normalizedPath);
+                    e.CreatedAt = fi.CreationTime;
+                    e.ModifiedAt = fi.LastWriteTime;
+
+                    double ageDays = (DateTime.Now - fi.CreationTime).TotalDays;
+                    e.AgeDays = (int)ageDays;
+                    e.FreshFile = ageDays < 7;
+                }
+                catch { }
+            }
+
+            return e;
         }
 
         private static string ExtractPath(string raw)
@@ -482,6 +566,9 @@ namespace BunnyBlack.Core
             return path;
         }
 
+        // ============================================================
+        // ЭВРИСТИКА
+        // ============================================================
         private static void MarkSuspicious(AutorunEntry e)
         {
             if (string.IsNullOrEmpty(e.Path)) return;
@@ -504,18 +591,38 @@ namespace BunnyBlack.Core
                 return;
             }
 
-            if (!string.IsNullOrEmpty(e.Path) && e.Path.StartsWith("cmd ") ||
-                e.Path.StartsWith("powershell") || e.Path.StartsWith("wscript") ||
-                e.Path.StartsWith("cscript") || e.Path.StartsWith("mshta") ||
-                e.Path.StartsWith("rundll32"))
+            if (e.Path.StartsWith("cmd ") || e.Path.StartsWith("powershell") ||
+                e.Path.StartsWith("wscript") || e.Path.StartsWith("cscript") ||
+                e.Path.StartsWith("mshta") || e.Path.StartsWith("rundll32"))
             {
                 e.Suspicious = true;
                 e.SuspicionReason = "LOLBin-запуск (" + e.Path.Split(' ')[0] + ")";
+                return;
+            }
+
+            if (!e.FileExists && !string.IsNullOrEmpty(e.Path) && e.Path.Contains(".exe"))
+            {
+                e.Suspicious = true;
+                e.SuspicionReason = "Файла нет — запись-призрак";
+                return;
+            }
+
+            if (e.Category == "Run" && e.FileExists && !e.Signed)
+            {
+                e.Suspicious = true;
+                e.SuspicionReason = "Автозапуск без цифровой подписи";
+                return;
+            }
+
+            if (e.Category == "Run" && e.FreshFile && !e.Suspicious)
+            {
+                e.Suspicious = true;
+                e.SuspicionReason = $"Файл свежий ({e.AgeDays} дней)";
             }
         }
 
         // ============================================================
-        // ОТКРЫТИЕ КЛЮЧА — живой или оффлайн
+        // ОТКРЫТИЕ КЛЮЧА
         // ============================================================
         private static RegistryKey OpenHive(bool offline, string hive, string subPath)
         {
@@ -523,24 +630,29 @@ namespace BunnyBlack.Core
             {
                 if (!offline)
                 {
-                    var root = hive == "SOFTWARE" ? Registry.LocalMachine : Registry.LocalMachine;
-                    string prefix = hive == "SOFTWARE" ? "SOFTWARE\\" : "SYSTEM\\";
-                    return root.OpenSubKey(prefix + subPath);
+                    if (hive == "SOFTWARE")
+                        return Registry.LocalMachine.OpenSubKey(@"SOFTWARE\" + subPath);
+                    if (hive == "SYSTEM")
+                        return Registry.LocalMachine.OpenSubKey(@"SYSTEM\" + subPath);
+                    return null;
                 }
 
-                // оффлайн
                 if (!RegistryHelper.IsWinReEnvironment()) return null;
                 string _;
                 RegistryHelper.EnsureOfflineHives(out _);
 
-                string mount = hive == "SOFTWARE" ? "BunnyBlack_Offline_SOFTWARE"
-                             : hive == "SYSTEM" ? "BunnyBlack_Offline_SYSTEM"
-                             : hive == "SAM" ? "BunnyBlack_Offline_SAM"
-                             : "BunnyBlack_Offline_SOFTWARE";
+                string mount;
+                if (hive == "SOFTWARE") mount = "BB_Offline_SOFTWARE";
+                else if (hive == "SYSTEM") mount = "BB_Offline_SYSTEM";
+                else mount = "BB_Offline_SOFTWARE";
 
                 return Registry.LocalMachine.OpenSubKey(mount + "\\" + subPath);
             }
-            catch (Exception ex) { Debug.WriteLine("[OpenHive] " + ex.Message); return null; }
+            catch (Exception ex)
+            {
+                BbLog.Error("[AutorunsExtended.OpenHive]", ex);
+                return null;
+            }
         }
 
         private static void ScanHive(List<AutorunEntry> list, bool offline, string hive, string subPath,
@@ -586,7 +698,7 @@ namespace BunnyBlack.Core
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { BbLog.Error($"[ScanHive/{category}]", ex); }
         }
     }
 }

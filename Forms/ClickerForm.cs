@@ -1,8 +1,5 @@
 ﻿// language: C#, file: Forms/ClickerForm.cs
-// Полная замена.
-// п.15 — прогресс хранится в Clicker.dat рядом с exe (едет с флешкой) + дублирование в реестр.
-// п.18 — автосохранение раз в 15 сек и при кликах.
-// Сохранены все апгрейды, картинки, авто-кликер, анимация.
+// Апгрейды пересоздаются при смене языка.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -23,6 +20,11 @@ namespace BunnyBlack.Forms
         private Label autoClickerLabel;
         private PictureBox clickerPicture;
         private FlowLayoutPanel shopPanel;
+        private Label titleLabel;
+        private Label shopTitleLabel;
+        private Button exportBtn;
+        private Button importBtn;
+        private Button resetBtn;
 
         private long score = 0;
         private long clickPower = 1;
@@ -34,8 +36,8 @@ namespace BunnyBlack.Forms
 
         private class Upgrade
         {
-            public string Name { get; set; }
-            public string Description { get; set; }
+            public string NameKey { get; set; }
+            public string DescKey { get; set; }
             public long Cost { get; set; }
             public long BaseCost { get; set; }
             public int Level { get; set; } = 0;
@@ -47,17 +49,41 @@ namespace BunnyBlack.Forms
         public ClickerForm(bool winRE)
         {
             isWinRE = winRE;
-            this.BackColor = Color.FromArgb(13, 13, 13);
-            this.ForeColor = Color.FromArgb(216, 216, 216);
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
             InitializeComponent();
             LoadProgress();
             StartAutoClicker();
             StartAutoSave();
+
+            ThemeManager.ThemeChanged += ApplyTheme;
+            Loc.LanguageChanged += ApplyLanguage;
         }
 
-        // ============================================================
-        // п.15 — путь к файлу прогресса рядом с exe
-        // ============================================================
+        public void ApplyTheme()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyTheme)); return; }
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
+            ThemeHelper.Apply(this);
+            RebuildShop();
+            Invalidate(true);
+        }
+
+        public void ApplyLanguage()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyLanguage)); return; }
+            if (titleLabel != null) titleLabel.Text = Loc.T("clicker.title");
+            if (shopTitleLabel != null) shopTitleLabel.Text = Loc.T("clicker.shop");
+            if (exportBtn != null) exportBtn.Text = Loc.T("btn.export");
+            if (importBtn != null) importBtn.Text = Loc.T("btn.import");
+            if (resetBtn != null) resetBtn.Text = Loc.T("btn.reset");
+
+            RebuildShop();
+            UpdateUI();
+            Invalidate(true);
+        }
+
         private string ProgressFilePath
         {
             get
@@ -82,25 +108,24 @@ namespace BunnyBlack.Forms
                 ColumnCount = 2,
                 RowCount = 2,
                 Padding = new Padding(28, 24, 28, 20),
-                BackColor = Color.FromArgb(13, 13, 13)
+                BackColor = ThemeManager.Background
             };
             mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
             mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            var title = new Label
+            titleLabel = new Label
             {
-                Text = "Кликер",
+                Text = Loc.T("clicker.title"),
                 Font = new Font("Segoe UI", 18, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                ForeColor = ThemeManager.Foreground,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleLeft
             };
-            mainLayout.Controls.Add(title, 0, 0);
+            mainLayout.Controls.Add(titleLabel, 0, 0);
 
-            // п.15 — заголовок магазина + кнопки экспорт/импорт
             var shopHeader = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -109,56 +134,48 @@ namespace BunnyBlack.Forms
                 WrapContents = false
             };
 
-            var shopTitle = new Label
+            shopTitleLabel = new Label
             {
-                Text = "Магазин улучшений",
+                Text = Loc.T("clicker.shop"),
                 Font = new Font("Segoe UI", 18, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                ForeColor = ThemeManager.Foreground,
                 AutoSize = true,
                 BackColor = Color.Transparent,
                 Margin = new Padding(0, 12, 20, 0)
             };
-            shopHeader.Controls.Add(shopTitle);
+            shopHeader.Controls.Add(shopTitleLabel);
 
-            var exportBtn = new Button
-            {
-                Text = "Экспорт",
-                Height = 28,
-                Width = 90,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(30, 30, 30),
-                ForeColor = Color.FromArgb(200, 200, 200),
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(60, 60, 60) },
-                Cursor = Cursors.Hand,
-                Margin = new Padding(0, 12, 6, 0),
-                Font = new Font("Segoe UI", 9)
-            };
+            exportBtn = MakeSmallButton(Loc.T("btn.export"));
             exportBtn.Click += (s, e) =>
             {
                 SaveProgress();
-                NedoMessageBox.Show($"Прогресс сохранён:\n{ProgressFilePath}");
+                NedoMessageBox.Show($"Saved:\n{ProgressFilePath}");
             };
             shopHeader.Controls.Add(exportBtn);
 
-            var importBtn = new Button
+            importBtn = MakeSmallButton(Loc.T("btn.import"));
+            importBtn.Click += (s, e) =>
             {
-                Text = "Импорт",
+                LoadProgress();
+                NedoMessageBox.Show("Loaded");
+            };
+            shopHeader.Controls.Add(importBtn);
+
+            resetBtn = new Button
+            {
+                Text = Loc.T("btn.reset"),
                 Height = 28,
                 Width = 90,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(30, 30, 30),
-                ForeColor = Color.FromArgb(200, 200, 200),
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(60, 60, 60) },
+                BackColor = ThemeManager.DangerBack,
+                ForeColor = ThemeManager.Danger,
+                FlatAppearance = { BorderSize = 1, BorderColor = ThemeManager.Danger },
                 Cursor = Cursors.Hand,
                 Margin = new Padding(0, 12, 0, 0),
                 Font = new Font("Segoe UI", 9)
             };
-            importBtn.Click += (s, e) =>
-            {
-                LoadProgress();
-                NedoMessageBox.Show("Прогресс загружен");
-            };
-            shopHeader.Controls.Add(importBtn);
+            resetBtn.Click += (s, e) => ResetProgress();
+            shopHeader.Controls.Add(resetBtn);
 
             mainLayout.Controls.Add(shopHeader, 1, 0);
 
@@ -176,9 +193,9 @@ namespace BunnyBlack.Forms
 
             scoreLabel = new Label
             {
-                Text = "Кликов: 0",
+                Text = Loc.T("clicker.clicks", 0),
                 Font = new Font("Segoe UI", 22, FontStyle.Bold),
-                ForeColor = Color.FromArgb(136, 221, 170),
+                ForeColor = ThemeManager.Success,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleCenter
@@ -187,9 +204,9 @@ namespace BunnyBlack.Forms
 
             clickPowerLabel = new Label
             {
-                Text = "Сила клика: 1",
+                Text = Loc.T("clicker.power", 1),
                 Font = new Font("Segoe UI", 12),
-                ForeColor = Color.FromArgb(170, 170, 170),
+                ForeColor = ThemeManager.Muted,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleCenter
@@ -214,16 +231,12 @@ namespace BunnyBlack.Forms
             {
                 var rm = new ResourceManager("BunnyBlack.Properties.Resources", typeof(ClickerForm).Assembly);
                 object img = rm.GetObject("ClickerImage");
-
                 if (img is Image originalImage)
                     clickerPicture.Image = MakeCircularImage(originalImage, 320);
                 else
                     clickerPicture.Image = CreatePlaceholderCircle(320);
             }
-            catch
-            {
-                clickerPicture.Image = CreatePlaceholderCircle(320);
-            }
+            catch { clickerPicture.Image = CreatePlaceholderCircle(320); }
 
             clickerPicture.Click += (s, e) =>
             {
@@ -242,9 +255,9 @@ namespace BunnyBlack.Forms
 
             autoClickerLabel = new Label
             {
-                Text = "Авто-кликер: 0 / сек",
+                Text = Loc.T("clicker.auto", 0),
                 Font = new Font("Segoe UI", 12),
-                ForeColor = Color.FromArgb(136, 221, 170),
+                ForeColor = ThemeManager.Success,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleCenter
@@ -263,36 +276,101 @@ namespace BunnyBlack.Forms
                 Padding = new Padding(10, 0, 0, 0)
             };
 
-            // ============================================================
-            // АПГРЕЙДЫ — без изменений
-            // ============================================================
-            upgrades.Clear();
-
-            upgrades.Add(new Upgrade { Name = "Крепкий палец", Description = "+1 к силе клика", Cost = 10, BaseCost = 10, OnBuy = () => { clickPower += 1; } });
-            upgrades.Add(new Upgrade { Name = "Быстрый палец", Description = "+5 к силе клика", Cost = 60, BaseCost = 60, OnBuy = () => { clickPower += 5; } });
-            upgrades.Add(new Upgrade { Name = "Стальной палец", Description = "+15 к силе клика", Cost = 200, BaseCost = 200, OnBuy = () => { clickPower += 15; } });
-            upgrades.Add(new Upgrade { Name = "Авто-кликер I", Description = "+1 клик/сек", Cost = 50, BaseCost = 50, OnBuy = () => { autoClickerLevel += 1; } });
-            upgrades.Add(new Upgrade { Name = "Авто-кликер II", Description = "+5 кликов/сек", Cost = 250, BaseCost = 250, OnBuy = () => { autoClickerLevel += 5; } });
-            upgrades.Add(new Upgrade { Name = "Авто-кликер III", Description = "+15 кликов/сек", Cost = 800, BaseCost = 800, OnBuy = () => { autoClickerLevel += 15; } });
-            upgrades.Add(new Upgrade { Name = "Золотой палец", Description = "+50 к силе клика", Cost = 1000, BaseCost = 1000, OnBuy = () => { clickPower += 50; } });
-            upgrades.Add(new Upgrade { Name = "Гигантский палец", Description = "+150 к силе клика", Cost = 4000, BaseCost = 4000, OnBuy = () => { clickPower += 150; } });
-            upgrades.Add(new Upgrade { Name = "Турбо-кликер", Description = "+50 кликов/сек", Cost = 3000, BaseCost = 3000, OnBuy = () => { autoClickerLevel += 50; } });
-            upgrades.Add(new Upgrade { Name = "Легендарный палец", Description = "+500 к силе клика", Cost = 10000, BaseCost = 10000, OnBuy = () => { clickPower += 500; } });
-
-            foreach (var upgrade in upgrades)
-            {
-                Panel card = CreateShopCard(upgrade);
-                shopPanel.Controls.Add(card);
-            }
+            DefineUpgrades();
+            RebuildShop();
 
             mainLayout.Controls.Add(shopPanel, 1, 1);
             this.Controls.Add(mainLayout);
         }
 
+        private Button MakeSmallButton(string text)
+        {
+            return new Button
+            {
+                Text = text,
+                Height = 28,
+                Width = 90,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = ThemeManager.PanelAlt,
+                ForeColor = ThemeManager.Foreground,
+                FlatAppearance = { BorderSize = 1, BorderColor = ThemeManager.Border },
+                Cursor = Cursors.Hand,
+                Margin = new Padding(0, 12, 6, 0),
+                Font = new Font("Segoe UI", 9)
+            };
+        }
+
+        private void DefineUpgrades()
+        {
+            upgrades.Clear();
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.strong", DescKey = "clicker.up.desc.plus1", Cost = 10, BaseCost = 10, OnBuy = () => { clickPower += 1; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.fast", DescKey = "clicker.up.desc.plus5", Cost = 60, BaseCost = 60, OnBuy = () => { clickPower += 5; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.steel", DescKey = "clicker.up.desc.plus15", Cost = 200, BaseCost = 200, OnBuy = () => { clickPower += 15; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.auto1", DescKey = "clicker.up.desc.auto1", Cost = 50, BaseCost = 50, OnBuy = () => { autoClickerLevel += 1; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.auto2", DescKey = "clicker.up.desc.auto5", Cost = 250, BaseCost = 250, OnBuy = () => { autoClickerLevel += 5; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.auto3", DescKey = "clicker.up.desc.auto15", Cost = 800, BaseCost = 800, OnBuy = () => { autoClickerLevel += 15; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.golden", DescKey = "clicker.up.desc.plus50", Cost = 1000, BaseCost = 1000, OnBuy = () => { clickPower += 50; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.giant", DescKey = "clicker.up.desc.plus150", Cost = 4000, BaseCost = 4000, OnBuy = () => { clickPower += 150; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.turbo", DescKey = "clicker.up.desc.auto50", Cost = 3000, BaseCost = 3000, OnBuy = () => { autoClickerLevel += 50; } });
+            upgrades.Add(new Upgrade { NameKey = "clicker.up.legendary", DescKey = "clicker.up.desc.plus500", Cost = 10000, BaseCost = 10000, OnBuy = () => { clickPower += 500; } });
+        }
+
+        private void RebuildShop()
+        {
+            if (shopPanel == null) return;
+
+            shopPanel.Controls.Clear();
+
+            // Восстанавливаем цену с учётом уровня
+            foreach (var u in upgrades)
+            {
+                u.Cost = u.BaseCost;
+                for (int j = 0; j < u.Level; j++)
+                    u.Cost = (long)(u.Cost * 1.5);
+            }
+
+            foreach (var u in upgrades)
+                shopPanel.Controls.Add(CreateShopCard(u));
+        }
+
+        private void ResetProgress()
+        {
+            if (MessageBoxHelper.Show(
+                "Reset progress?", Loc.T("warn.confirm"),
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return;
+
+            try
+            {
+                score = 0;
+                clickPower = 1;
+                autoClickerLevel = 0;
+
+                for (int i = 0; i < upgrades.Count; i++)
+                {
+                    upgrades[i].Level = 0;
+                    upgrades[i].Cost = upgrades[i].BaseCost;
+                }
+
+                try { if (File.Exists(ProgressFilePath)) File.Delete(ProgressFilePath); }
+                catch { }
+                try { Registry.CurrentUser.DeleteSubKeyTree(@"SOFTWARE\BunnyBlack\Clicker", false); }
+                catch { }
+
+                RebuildShop();
+                UpdateUI();
+
+                NedoMessageBox.Show("Reset done");
+            }
+            catch (Exception ex)
+            {
+                NedoMessageBox.Show("Error: " + ex.Message, isError: true);
+            }
+        }
+
         private void CenterPicture(Panel container)
         {
             if (container == null || clickerPicture == null) return;
-
             int x = (container.Width - clickerPicture.Width) / 2;
             int y = (container.Height - clickerPicture.Height) / 2;
             if (x < 0) x = 0;
@@ -302,21 +380,20 @@ namespace BunnyBlack.Forms
 
         private Panel CreateShopCard(Upgrade upgrade)
         {
-            Panel card = new Panel
+            var card = new Panel
             {
                 Height = 70,
                 Width = 340,
-                BackColor = Color.FromArgb(22, 22, 22),
+                BackColor = ThemeManager.PanelAlt,
                 Margin = new Padding(0, 0, 0, 8)
             };
-
             card.Paint += (s, e) =>
             {
                 ControlPaint.DrawBorder(e.Graphics, card.ClientRectangle,
-                    Color.FromArgb(45, 45, 45), 1, ButtonBorderStyle.Solid,
-                    Color.FromArgb(45, 45, 45), 1, ButtonBorderStyle.Solid,
-                    Color.FromArgb(45, 45, 45), 1, ButtonBorderStyle.Solid,
-                    Color.FromArgb(45, 45, 45), 1, ButtonBorderStyle.Solid);
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid,
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid,
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid,
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid);
             };
 
             var layout = new TableLayoutPanel
@@ -331,37 +408,35 @@ namespace BunnyBlack.Forms
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
 
-            var nameLabel = new Label
+            layout.Controls.Add(new Label
             {
-                Text = upgrade.Name,
+                Text = Loc.T(upgrade.NameKey),
                 Font = new Font("Segoe UI", 11, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                ForeColor = ThemeManager.Foreground,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleLeft
-            };
-            layout.Controls.Add(nameLabel, 0, 0);
+            }, 0, 0);
 
-            var descLabel = new Label
+            layout.Controls.Add(new Label
             {
-                Text = upgrade.Description,
+                Text = Loc.T(upgrade.DescKey),
                 Font = new Font("Segoe UI", 9),
-                ForeColor = Color.FromArgb(150, 150, 150),
+                ForeColor = ThemeManager.Muted,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleLeft
-            };
-            layout.Controls.Add(descLabel, 0, 1);
+            }, 0, 1);
 
             var buyBtn = new Button
             {
                 Text = $"{upgrade.Cost}",
                 Height = 40,
                 Width = 100,
-                BackColor = Color.FromArgb(30, 55, 40),
-                ForeColor = Color.FromArgb(136, 221, 170),
+                BackColor = ThemeManager.SuccessBack,
+                ForeColor = ThemeManager.Success,
                 FlatStyle = FlatStyle.Flat,
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(51, 102, 68) },
+                FlatAppearance = { BorderSize = 1, BorderColor = ThemeManager.Success },
                 Cursor = Cursors.Hand,
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Dock = DockStyle.Fill,
@@ -380,15 +455,11 @@ namespace BunnyBlack.Forms
                     UpdateUI();
                     SaveProgress();
                 }
-                else
-                {
-                    NedoMessageBox.Show("Недостаточно кликов!", isError: true);
-                }
+                else NedoMessageBox.Show("Not enough", isError: true);
             };
 
             layout.Controls.Add(buyBtn, 1, 0);
             layout.SetRowSpan(buyBtn, 2);
-
             card.Controls.Add(layout);
             return card;
         }
@@ -400,20 +471,19 @@ namespace BunnyBlack.Forms
                 scoreLabel.Invoke(new Action(UpdateUI));
                 return;
             }
-
-            scoreLabel.Text = $"Кликов: {score}";
-            clickPowerLabel.Text = $"Сила клика: {clickPower}";
-            autoClickerLabel.Text = $"Авто-кликер: {autoClickerLevel} / сек";
+            scoreLabel.Text = Loc.T("clicker.clicks", score);
+            clickPowerLabel.Text = Loc.T("clicker.power", clickPower);
+            autoClickerLabel.Text = Loc.T("clicker.auto", autoClickerLevel);
         }
 
         private void AnimateClick()
         {
-            var originalLocation = clickerPicture.Location;
-            clickerPicture.Location = new Point(originalLocation.X + 3, originalLocation.Y + 3);
+            var orig = clickerPicture.Location;
+            clickerPicture.Location = new Point(orig.X + 3, orig.Y + 3);
             var t = new Timer { Interval = 50 };
             t.Tick += (ts, te) =>
             {
-                clickerPicture.Location = originalLocation;
+                clickerPicture.Location = orig;
                 t.Stop();
                 t.Dispose();
             };
@@ -441,9 +511,6 @@ namespace BunnyBlack.Forms
             autoSaveTimer.Start();
         }
 
-        // ============================================================
-        // п.15 — SAVE: файл рядом с exe + дублирование в реестр
-        // ============================================================
         private void SaveProgress()
         {
             try
@@ -455,8 +522,7 @@ namespace BunnyBlack.Forms
                 for (int i = 0; i < upgrades.Count; i++)
                     sb.AppendLine($"Upgrade{i}_Level={upgrades[i].Level}");
 
-                try { File.WriteAllText(ProgressFilePath, sb.ToString()); }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SaveProgress/file] {ex.Message}"); }
+                try { File.WriteAllText(ProgressFilePath, sb.ToString()); } catch { }
 
                 try
                 {
@@ -472,17 +538,11 @@ namespace BunnyBlack.Forms
                         }
                     }
                 }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SaveProgress/reg] {ex.Message}"); }
+                catch { }
             }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[SaveProgress] {ex.Message}");
-            }
+            catch { }
         }
 
-        // ============================================================
-        // п.15 — LOAD: сначала файл, если нет — реестр
-        // ============================================================
         private void LoadProgress()
         {
             try
@@ -493,9 +553,10 @@ namespace BunnyBlack.Forms
                     {
                         ParseProgressLines(File.ReadAllLines(ProgressFilePath));
                         UpdateUI();
+                        RebuildShop();
                         return;
                     }
-                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[LoadProgress/file] {ex.Message}"); }
+                    catch { }
                 }
 
                 using (var k = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\BunnyBlack\Clicker"))
@@ -509,20 +570,13 @@ namespace BunnyBlack.Forms
                     for (int i = 0; i < upgrades.Count; i++)
                     {
                         if (int.TryParse(k.GetValue($"Upgrade{i}_Level")?.ToString(), out int lvl) && lvl > 0)
-                        {
                             upgrades[i].Level = lvl;
-                            upgrades[i].Cost = upgrades[i].BaseCost;
-                            for (int j = 0; j < lvl; j++)
-                                upgrades[i].Cost = (long)(upgrades[i].Cost * 1.5);
-                        }
                     }
                     UpdateUI();
+                    RebuildShop();
                 }
             }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[LoadProgress] {ex.Message}");
-            }
+            catch { }
         }
 
         private void ParseProgressLines(string[] lines)
@@ -532,7 +586,6 @@ namespace BunnyBlack.Forms
                 var line = raw.Trim();
                 var eq = line.IndexOf('=');
                 if (eq <= 0) continue;
-
                 string key = line.Substring(0, eq);
                 string val = line.Substring(eq + 1);
 
@@ -543,14 +596,10 @@ namespace BunnyBlack.Forms
                 {
                     string mid = key.Substring("Upgrade".Length);
                     mid = mid.Substring(0, mid.Length - "_Level".Length);
-
                     if (int.TryParse(mid, out int idx) && idx >= 0 && idx < upgrades.Count
                         && int.TryParse(val, out int lvl) && lvl > 0)
                     {
                         upgrades[idx].Level = lvl;
-                        upgrades[idx].Cost = upgrades[idx].BaseCost;
-                        for (int j = 0; j < lvl; j++)
-                            upgrades[idx].Cost = (long)(upgrades[idx].Cost * 1.5);
                     }
                 }
             }
@@ -558,14 +607,13 @@ namespace BunnyBlack.Forms
 
         private Image MakeCircularImage(Image sourceImage, int size)
         {
-            Bitmap squareBitmap = new Bitmap(size, size);
-            using (Graphics g = Graphics.FromImage(squareBitmap))
+            Bitmap bmp = new Bitmap(size, size);
+            using (Graphics g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.Clear(Color.Transparent);
-
                 using (GraphicsPath path = new GraphicsPath())
                 {
                     path.AddEllipse(0, 0, size, size);
@@ -573,7 +621,7 @@ namespace BunnyBlack.Forms
                     g.DrawImage(sourceImage, new Rectangle(0, 0, size, size));
                 }
             }
-            return squareBitmap;
+            return bmp;
         }
 
         private Image CreatePlaceholderCircle(int size)
@@ -583,16 +631,26 @@ namespace BunnyBlack.Forms
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.Clear(Color.Transparent);
-
-                using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(22, 22, 22)))
-                    g.FillEllipse(bgBrush, 0, 0, size - 1, size - 1);
-
+                using (SolidBrush b = new SolidBrush(ThemeManager.PanelAlt))
+                    g.FillEllipse(b, 0, 0, size - 1, size - 1);
                 using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                using (Font font = new Font("Segoe UI", 12, FontStyle.Bold))
-                using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(136, 221, 170)))
-                    g.DrawString("Нет картинки", font, textBrush, new RectangleF(0, 0, size, size), sf);
+                using (Font f = new Font("Segoe UI", 12, FontStyle.Bold))
+                using (SolidBrush t = new SolidBrush(ThemeManager.Success))
+                    g.DrawString("No image", f, t, new RectangleF(0, 0, size, size), sf);
             }
             return bmp;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.ThemeChanged -= ApplyTheme;
+                Loc.LanguageChanged -= ApplyLanguage;
+                try { autoClickerTimer?.Stop(); autoClickerTimer?.Dispose(); } catch { }
+                try { autoSaveTimer?.Stop(); autoSaveTimer?.Dispose(); } catch { }
+            }
+            base.Dispose(disposing);
         }
     }
 }

@@ -1,20 +1,15 @@
 ﻿// language: C#, file: Forms/AutostartForm.cs
-// Полная замена. Только ключевые автозапуски:
-//   Run / RunOnce (HKLM + HKCU)
-//   Winlogon
-//   SafeBoot
-//   Session Manager (BootExecute)
-//   System\Setup (CmdLine, SetupType, EnableCursorSuppression)
-//   Windows (AppInit_DLLs)
-// Группы + отступы └─, короткий префикс HKLM\Software.
+// Полная замена. Источник данных — AutorunsExtended.Collect().
+// Группы: Run, Winlogon, BootExecute, IFEO Debugger.
+// Тема + локализация.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 using BunnyBlack.Core;
-using Microsoft.Win32;
 
 namespace BunnyBlack.Forms
 {
@@ -25,6 +20,7 @@ namespace BunnyBlack.Forms
         private TextBox filterBox;
         private Button refreshBtn;
         private Label statusLabel;
+        private Label titleLabel;
         private bool isWinRE;
 
         private class Entry
@@ -38,7 +34,13 @@ namespace BunnyBlack.Forms
             public string FilePathHint;
             public bool IsGroup;
             public bool Exists;
+            public bool Signed;
+            public DateTime? CreatedAt;
+            public DateTime? ModifiedAt;
+            public int AgeDays;
+            public bool Fresh;
             public bool Suspicious;
+            public string Status;
         }
 
         private readonly List<Entry> entries = new List<Entry>();
@@ -46,10 +48,59 @@ namespace BunnyBlack.Forms
         public AutostartForm(bool winRE)
         {
             isWinRE = winRE;
-            this.BackColor = Color.FromArgb(13, 13, 13);
-            this.ForeColor = Color.FromArgb(216, 216, 216);
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
             InitializeComponent();
             LoadData();
+
+            ThemeManager.ThemeChanged += ApplyTheme;
+            Loc.LanguageChanged += ApplyLanguage;
+        }
+
+        public void ApplyTheme()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyTheme)); return; }
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
+            ThemeHelper.Apply(this);
+            Invalidate(true);
+        }
+
+        public void ApplyLanguage()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyLanguage)); return; }
+            if (titleLabel != null) titleLabel.Text = Loc.T("autostart.title");
+            if (filterBox != null) filterBox.PlaceholderText = Loc.T("autostart.filter");
+            if (refreshBtn != null) refreshBtn.Text = Loc.T("btn.refresh");
+
+            if (grid != null && grid.Columns.Count >= 8)
+            {
+                grid.Columns[0].HeaderText = Loc.T("autostart.col.name");
+                grid.Columns[1].HeaderText = Loc.T("autostart.col.value");
+                grid.Columns[2].HeaderText = Loc.T("autostart.col.exists");
+                grid.Columns[3].HeaderText = Loc.T("autostart.col.signed");
+                grid.Columns[4].HeaderText = Loc.T("autostart.col.created");
+                grid.Columns[5].HeaderText = Loc.T("autostart.col.modified");
+                grid.Columns[6].HeaderText = Loc.T("autostart.col.age");
+                grid.Columns[7].HeaderText = Loc.T("autostart.col.status");
+            }
+
+            if (grid?.ContextMenuStrip != null)
+            {
+                var items = grid.ContextMenuStrip.Items;
+                if (items.Count >= 7)
+                {
+                    items[0].Text = Loc.T("autostart.menu.edit");
+                    items[1].Text = Loc.T("autostart.menu.delete");
+                    if (items.Count > 3) items[3].Text = Loc.T("autostart.menu.location");
+                    if (items.Count > 4) items[4].Text = Loc.T("autostart.menu.regedit");
+                    if (items.Count > 5) items[5].Text = Loc.T("autostart.menu.copyfull");
+                    if (items.Count > 6) items[6].Text = Loc.T("autostart.menu.copyval");
+                    if (items.Count > 8) items[8].Text = Loc.T("autostart.menu.quar");
+                }
+            }
+
+            Invalidate(true);
         }
 
         private void InitializeComponent()
@@ -62,22 +113,22 @@ namespace BunnyBlack.Forms
                 ColumnCount = 1,
                 RowCount = 3,
                 Padding = new Padding(28, 20, 28, 20),
-                BackColor = Color.FromArgb(13, 13, 13)
+                BackColor = ThemeManager.Background
             };
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            var title = new Label
+            titleLabel = new Label
             {
-                Text = "Автозагрузка",
+                Text = Loc.T("autostart.title"),
                 Font = new Font("Segoe UI", 18, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                ForeColor = ThemeManager.Foreground,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleLeft
             };
-            layout.Controls.Add(title, 0, 0);
+            layout.Controls.Add(titleLabel, 0, 0);
 
             topBar = new FlowLayoutPanel
             {
@@ -90,24 +141,25 @@ namespace BunnyBlack.Forms
             filterBox = new TextBox
             {
                 Width = 340,
-                BackColor = Color.FromArgb(24, 24, 24),
-                ForeColor = Color.FromArgb(216, 216, 216),
+                BackColor = ThemeManager.Input,
+                ForeColor = ThemeManager.Foreground,
                 BorderStyle = BorderStyle.FixedSingle,
                 Font = new Font("Segoe UI", 10),
                 Margin = new Padding(0, 2, 8, 0)
             };
+            try { filterBox.PlaceholderText = Loc.T("autostart.filter"); } catch { }
             filterBox.TextChanged += (s, e) => ApplyFilter();
             topBar.Controls.Add(filterBox);
 
             refreshBtn = new Button
             {
-                Text = "Обновить",
+                Text = Loc.T("btn.refresh"),
                 Width = 110,
                 Height = 26,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(30, 30, 30),
-                ForeColor = Color.FromArgb(240, 240, 240),
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(60, 60, 60) },
+                BackColor = ThemeManager.PanelAlt,
+                ForeColor = ThemeManager.Foreground,
+                FlatAppearance = { BorderSize = 1, BorderColor = ThemeManager.Border },
                 Cursor = Cursors.Hand,
                 Font = new Font("Segoe UI", 9),
                 Margin = new Padding(0, 2, 12, 0)
@@ -118,7 +170,7 @@ namespace BunnyBlack.Forms
             statusLabel = new Label
             {
                 Text = "",
-                ForeColor = Color.FromArgb(120, 120, 120),
+                ForeColor = ThemeManager.Muted,
                 Font = new Font("Segoe UI", 9),
                 AutoSize = true,
                 BackColor = Color.Transparent,
@@ -131,10 +183,10 @@ namespace BunnyBlack.Forms
             grid = new DataGridView
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(13, 13, 13),
-                ForeColor = Color.FromArgb(216, 216, 216),
-                BackgroundColor = Color.FromArgb(13, 13, 13),
-                GridColor = Color.FromArgb(45, 45, 45),
+                BackColor = ThemeManager.Background,
+                ForeColor = ThemeManager.Foreground,
+                BackgroundColor = ThemeManager.Background,
+                GridColor = ThemeManager.Border,
                 BorderStyle = BorderStyle.None,
                 RowHeadersVisible = false,
                 AllowUserToAddRows = false,
@@ -157,26 +209,40 @@ namespace BunnyBlack.Forms
                 System.Reflection.BindingFlags.NonPublic,
                 null, grid, new object[] { true });
 
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(25, 25, 25);
-            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(200, 200, 200);
+            grid.ColumnHeadersDefaultCellStyle.BackColor = ThemeManager.Header;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = ThemeManager.Foreground;
             grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10, FontStyle.Bold);
-            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Color.FromArgb(25, 25, 25);
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = ThemeManager.Header;
 
-            grid.DefaultCellStyle.BackColor = Color.FromArgb(18, 18, 18);
-            grid.DefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(40, 50, 60);
-            grid.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 255, 255);
+            grid.DefaultCellStyle.BackColor = ThemeManager.Row;
+            grid.DefaultCellStyle.ForeColor = ThemeManager.Foreground;
+            grid.DefaultCellStyle.SelectionBackColor = ThemeManager.Selection;
+            grid.DefaultCellStyle.SelectionForeColor = ThemeManager.SelectionText;
             grid.DefaultCellStyle.Font = new Font("Segoe UI", 9);
 
-            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(14, 14, 14);
-            grid.AlternatingRowsDefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
+            grid.AlternatingRowsDefaultCellStyle.BackColor = ThemeManager.RowAlt;
+            grid.AlternatingRowsDefaultCellStyle.ForeColor = ThemeManager.Foreground;
 
-            grid.Columns.Add("Name", "Name");
-            grid.Columns.Add("Value", "Value");
-            grid.Columns[0].Width = 700;
-            grid.Columns[1].Width = 620;
-            grid.Columns[0].SortMode = DataGridViewColumnSortMode.NotSortable;
-            grid.Columns[1].SortMode = DataGridViewColumnSortMode.NotSortable;
+            grid.Columns.Add("Name", Loc.T("autostart.col.name"));
+            grid.Columns.Add("Value", Loc.T("autostart.col.value"));
+            grid.Columns.Add("Exists", Loc.T("autostart.col.exists"));
+            grid.Columns.Add("Signed", Loc.T("autostart.col.signed"));
+            grid.Columns.Add("Created", Loc.T("autostart.col.created"));
+            grid.Columns.Add("Modified", Loc.T("autostart.col.modified"));
+            grid.Columns.Add("Age", Loc.T("autostart.col.age"));
+            grid.Columns.Add("Status", Loc.T("autostart.col.status"));
+
+            grid.Columns[0].Width = 480;
+            grid.Columns[1].Width = 520;
+            grid.Columns[2].Width = 70;
+            grid.Columns[3].Width = 80;
+            grid.Columns[4].Width = 130;
+            grid.Columns[5].Width = 130;
+            grid.Columns[6].Width = 80;
+            grid.Columns[7].Width = 260;
+
+            for (int i = 0; i < grid.Columns.Count; i++)
+                grid.Columns[i].SortMode = DataGridViewColumnSortMode.NotSortable;
 
             grid.ContextMenuStrip = BuildContextMenu();
             grid.CellDoubleClick += (s, e) => EditValueInline(e.RowIndex);
@@ -185,215 +251,48 @@ namespace BunnyBlack.Forms
             this.Controls.Add(layout);
         }
 
-        // ============================================================
-        // СБОР ДАННЫХ — только 7 групп
-        // ============================================================
         private void LoadData()
         {
             entries.Clear();
             grid.Rows.Clear();
-            statusLabel.Text = "Загрузка…";
+            statusLabel.Text = Loc.T("status.loading");
 
             try
             {
-                CollectRun();
-                CollectWinlogon();
-                CollectSafeBoot();
-                CollectBootExecute();
-                CollectCmdLineAndAppInit();
+                var collected = AutorunsExtended.Collect(isWinRE);
 
-                statusLabel.Text = $"Записей: {entries.Count}";
+                var order = new (string category, string title)[]
+                {
+                    ("Run",             @"HKLM\Software\Microsoft\Windows\CurrentVersion\Run"),
+                    ("Winlogon",        @"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"),
+                    ("BootExecute",     @"HKLM\System\CurrentControlSet\Control\Session Manager"),
+                    ("IFEO Debugger",   @"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"),
+                };
+
+                var byCategory = collected
+                    .GroupBy(e => e.Category ?? "Other")
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                foreach (var (cat, title) in order)
+                {
+                    if (!byCategory.TryGetValue(cat, out var items) || items.Count == 0)
+                        continue;
+
+                    AddGroup(title);
+                    foreach (var it in items)
+                        AddValue(title, it);
+                }
+
+                statusLabel.Text = $"Записей: {entries.Count(e => !e.IsGroup)}";
                 ApplyFilter();
             }
             catch (Exception ex)
             {
                 statusLabel.Text = "Ошибка: " + ex.Message;
+                BbLog.Error("[AutostartForm.LoadData]", ex);
             }
         }
 
-        // ------------------------------------------------------------
-        // RUN / RUNONCE
-        // ------------------------------------------------------------
-        private void CollectRun()
-        {
-            // HKLM\Run
-            CollectRunGroup(
-                @"HKLM\Software\Microsoft\Windows\CurrentVersion\Run",
-                RegistryHelper.GetRunItems(),
-                it => IsHklm(it.Type) && !it.Type.Contains("RunOnce"),
-                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-                "HKLM");
-
-            // HKCU\Run
-            CollectRunGroup(
-                @"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                RegistryHelper.GetRunItems(),
-                it => IsHkcu(it.Type) && !it.Type.Contains("RunOnce"),
-                @"Software\Microsoft\Windows\CurrentVersion\Run",
-                "HKCU");
-
-            // HKLM\RunOnce
-            CollectRunGroup(
-                @"HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-                RegistryHelper.GetRunOnceItems(),
-                it => IsHklm(it.Type),
-                @"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
-                "HKLM");
-
-            // HKCU\RunOnce
-            CollectRunGroup(
-                @"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-                RegistryHelper.GetRunOnceItems(),
-                it => IsHkcu(it.Type),
-                @"Software\Microsoft\Windows\CurrentVersion\RunOnce",
-                "HKCU");
-        }
-
-        private bool IsHklm(string t) => !string.IsNullOrEmpty(t) && t.Contains("HKLM");
-        private bool IsHkcu(string t) => !string.IsNullOrEmpty(t) && t.Contains("HKCU");
-
-        private void CollectRunGroup(string title, List<AutostartItem> items,
-            Func<AutostartItem, bool> filter, string keyPath, string hive)
-        {
-            var matching = new List<AutostartItem>();
-            foreach (var it in items)
-                if (filter(it)) matching.Add(it);
-
-            if (matching.Count == 0) return;
-
-            AddGroup(title);
-            foreach (var it in matching)
-                AddValue(title, it.Name, it.Path, hive, keyPath, it.Name, it.Exists, Suspicious(it.Path));
-        }
-
-        // ------------------------------------------------------------
-        // WINLOGON
-        // ------------------------------------------------------------
-        private void CollectWinlogon()
-        {
-            const string title = @"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Winlogon";
-            const string keyPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
-
-            var items = RegistryHelper.GetWinlogonItems();
-            if (items.Count == 0) return;
-
-            AddGroup(title);
-            foreach (var it in items)
-                AddValue(title, it.Name, it.Path, "HKLM", keyPath, it.Name, true, false);
-        }
-
-        // ------------------------------------------------------------
-        // SAFEBOOT
-        // ------------------------------------------------------------
-        private void CollectSafeBoot()
-        {
-            string[] groups = {
-                @"HKLM\System\CurrentControlSet\Control\SafeBoot",
-                @"HKLM\System\CurrentControlSet\Control\SafeBoot\Minimal",
-                @"HKLM\System\CurrentControlSet\Control\SafeBoot\Network"
-            };
-            string[] interesting = { "AlternateShell", "Default", "Option" };
-
-            foreach (var g in groups)
-            {
-                string keyPath = g.Replace(@"HKLM\System\", @"SYSTEM\");
-
-                RegistryKey root = null;
-                try
-                {
-                    root = isWinRE
-                        ? Registry.LocalMachine.OpenSubKey("BunnyBlack_Offline_SYSTEM\\" + keyPath.Substring(7))
-                        : Registry.LocalMachine.OpenSubKey(keyPath);
-                    if (root == null) continue;
-
-                    var found = new List<(string name, string value)>();
-                    foreach (var name in interesting)
-                    {
-                        string v = root.GetValue(name)?.ToString();
-                        if (!string.IsNullOrEmpty(v)) found.Add((name, v));
-                    }
-
-                    if (found.Count == 0) continue;
-
-                    AddGroup(g);
-                    foreach (var f in found)
-                        AddValue(g, f.name, f.value, "HKLM", keyPath, f.name, true, false);
-                }
-                catch { }
-                finally { root?.Dispose(); }
-            }
-        }
-
-        // ------------------------------------------------------------
-        // BOOT EXECUTE
-        // ------------------------------------------------------------
-        private void CollectBootExecute()
-        {
-            const string title = @"HKLM\System\CurrentControlSet\Control\Session Manager";
-            const string keyPath = @"SYSTEM\CurrentControlSet\Control\Session Manager";
-
-            try
-            {
-                RegistryKey root = isWinRE
-                    ? Registry.LocalMachine.OpenSubKey("BunnyBlack_Offline_SYSTEM\\CurrentControlSet\\Control\\Session Manager")
-                    : Registry.LocalMachine.OpenSubKey(keyPath);
-                if (root == null) return;
-
-                var boot = root.GetValue("BootExecute");
-                root.Dispose();
-
-                if (boot is string[] arr && arr.Length > 0)
-                {
-                    AddGroup(title);
-                    foreach (var s in arr)
-                        AddValue(title, "BootExecute", s, "HKLM", keyPath, "BootExecute", true, false);
-                }
-                else if (boot is string str && !string.IsNullOrEmpty(str))
-                {
-                    AddGroup(title);
-                    AddValue(title, "BootExecute", str, "HKLM", keyPath, "BootExecute", true, false);
-                }
-            }
-            catch { }
-        }
-
-        // ------------------------------------------------------------
-        // SYSTEM\SETUP (CmdLine, SetupType, EnableCursorSuppression)
-        // + APPINIT_DLLS
-        // ------------------------------------------------------------
-        private void CollectCmdLineAndAppInit()
-        {
-            const string setupTitle = @"HKLM\System\Setup";
-            const string setupKeyPath = @"SYSTEM\Setup";
-            var setupItems = RegistryHelper.GetCmdLineAutoRunItems();
-            if (setupItems.Count > 0)
-            {
-                AddGroup(setupTitle);
-                foreach (var it in setupItems)
-                    AddValue(setupTitle, it.Name, it.Path, "HKLM", setupKeyPath, it.Name, true, false);
-            }
-
-            const string winTitle = @"HKLM\Software\Microsoft\Windows NT\CurrentVersion\Windows";
-            const string winKeyPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows";
-            var appinit = RegistryHelper.GetAppInitDllsItems();
-
-            var realAppInit = new List<AppInitItem>();
-            foreach (var it in appinit)
-            {
-                if (it.Name == "LoadAppInit_DLLs" || it.Name == "RequireSignedAppInit_DLLs") continue;
-                realAppInit.Add(it);
-            }
-
-            if (realAppInit.Count == 0) return;
-
-            AddGroup(winTitle);
-            foreach (var it in realAppInit)
-                AddValue(winTitle, it.Name, it.Path, "HKLM", winKeyPath, it.Name, true, false);
-        }
-
-        // ============================================================
-        // ДОБАВЛЕНИЕ
-        // ============================================================
         private void AddGroup(string title)
         {
             var e = new Entry
@@ -405,19 +304,18 @@ namespace BunnyBlack.Forms
             };
             entries.Add(e);
 
-            int idx = grid.Rows.Add(title, "");
+            int idx = grid.Rows.Add(title, "", "", "", "", "", "", "");
             var row = grid.Rows[idx];
             row.Tag = e;
-            row.DefaultCellStyle.BackColor = Color.FromArgb(28, 28, 28);
-            row.DefaultCellStyle.ForeColor = Color.FromArgb(200, 200, 200);
-            row.DefaultCellStyle.SelectionBackColor = Color.FromArgb(40, 50, 60);
+            row.DefaultCellStyle.BackColor = ThemeManager.PanelAlt;
+            row.DefaultCellStyle.ForeColor = ThemeManager.Foreground;
+            row.DefaultCellStyle.SelectionBackColor = ThemeManager.Selection;
             row.DefaultCellStyle.Font = new Font("Segoe UI", 9, FontStyle.Bold);
         }
 
-        private void AddValue(string groupTitle, string valueName, string value,
-            string hive, string keyPath, string realValueName,
-            bool exists, bool suspicious)
+        private void AddValue(string groupTitle, AutorunEntry it)
         {
+            string valueName = it.Name;
             string shortName = string.IsNullOrEmpty(valueName)
                 ? "  └─ (default)"
                 : "  └─ " + valueName;
@@ -430,55 +328,67 @@ namespace BunnyBlack.Forms
             {
                 ShortName = shortName,
                 FullName = fullName,
-                Value = value ?? "",
-                Hive = hive,
-                KeyPath = keyPath,
-                ValueName = realValueName,
-                FilePathHint = value,
+                Value = it.Path ?? "",
+                Hive = it.Hive,
+                KeyPath = it.KeyPath,
+                ValueName = it.ValueName,
+                FilePathHint = it.Path,
                 IsGroup = false,
-                Exists = exists,
-                Suspicious = suspicious
+                Exists = it.FileExists,
+                Signed = it.Signed,
+                CreatedAt = it.CreatedAt,
+                ModifiedAt = it.ModifiedAt,
+                AgeDays = it.AgeDays,
+                Fresh = it.FreshFile,
+                Suspicious = it.Suspicious,
+                Status = it.SuspicionReason
             };
             entries.Add(e);
 
-            int idx = grid.Rows.Add(shortName, e.Value);
+            string existsStr = it.FileExists ? "Да" : "Нет";
+            string signedStr = it.FileExists ? (it.Signed ? "Да" : "Нет") : "—";
+            string createdStr = it.CreatedAt?.ToString("yyyy-MM-dd HH:mm") ?? "—";
+            string modifiedStr = it.ModifiedAt?.ToString("yyyy-MM-dd HH:mm") ?? "—";
+            string ageStr = it.FileExists ? $"{it.AgeDays} дн." : "—";
+            string statusStr = it.Suspicious ? (it.SuspicionReason ?? "Подозрительно") : "";
+
+            int idx = grid.Rows.Add(shortName, e.Value, existsStr, signedStr,
+                createdStr, modifiedStr, ageStr, statusStr);
             var row = grid.Rows[idx];
             row.Tag = e;
 
-            if (suspicious)
+            if (it.FreshFile)
             {
-                row.Cells[0].Style.ForeColor = Color.FromArgb(255, 120, 120);
-                row.Cells[1].Style.ForeColor = Color.FromArgb(255, 200, 120);
+                row.Cells[0].Style.ForeColor = ThemeManager.Warning;
+                row.Cells[1].Style.ForeColor = ThemeManager.Warning;
+                row.Cells[6].Style.ForeColor = ThemeManager.Warning;
+                row.Cells[6].Style.Font = new Font("Segoe UI", 9, FontStyle.Bold);
+            }
+            else if (it.Suspicious)
+            {
+                row.Cells[0].Style.ForeColor = ThemeManager.Danger;
+                row.Cells[1].Style.ForeColor = ThemeManager.Warning;
+                row.Cells[7].Style.ForeColor = ThemeManager.Danger;
             }
             else
             {
-                row.Cells[0].Style.ForeColor = Color.FromArgb(230, 230, 230);
-                row.Cells[1].Style.ForeColor = Color.FromArgb(180, 220, 180);
+                row.Cells[0].Style.ForeColor = ThemeManager.Foreground;
+                row.Cells[1].Style.ForeColor = ThemeManager.Success;
             }
 
-            if (!exists && !string.IsNullOrEmpty(value) &&
-                (value.Contains(".exe") || value.Contains(".dll") || value.Contains(":\\")))
+            if (it.FileExists && !it.Signed)
+                row.Cells[3].Style.ForeColor = ThemeManager.Danger;
+            else if (it.FileExists && it.Signed)
+                row.Cells[3].Style.ForeColor = ThemeManager.Success;
+
+            if (!it.FileExists)
             {
-                row.Cells[1].Style.ForeColor = Color.FromArgb(120, 120, 120);
+                row.Cells[2].Style.ForeColor = ThemeManager.Muted;
+                row.Cells[1].Style.ForeColor = ThemeManager.Muted;
                 row.Cells[1].Style.Font = new Font("Segoe UI", 9, FontStyle.Italic);
             }
         }
 
-        private bool Suspicious(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return false;
-            string lower = path.ToLowerInvariant();
-            return lower.Contains(@"\temp\") || lower.Contains(@"\appdata\local\temp") ||
-                   lower.Contains(@"\downloads\") || lower.Contains(@"\users\public\") ||
-                   (lower.Contains(@"\programdata\") && lower.Contains(".exe")) ||
-                   lower.Contains("powershell ") || lower.Contains("cmd.exe /c") ||
-                   lower.Contains("wscript") || lower.Contains("mshta") ||
-                   lower.Contains("rundll32");
-        }
-
-        // ============================================================
-        // ФИЛЬТР
-        // ============================================================
         private void ApplyFilter()
         {
             string f = (filterBox.Text ?? "").Trim().ToLowerInvariant();
@@ -494,7 +404,8 @@ namespace BunnyBlack.Forms
                 if (e == null || e.IsGroup) continue;
                 bool match =
                     (e.FullName?.ToLowerInvariant().Contains(f) ?? false) ||
-                    (e.Value?.ToLowerInvariant().Contains(f) ?? false);
+                    (e.Value?.ToLowerInvariant().Contains(f) ?? false) ||
+                    (e.Status?.ToLowerInvariant().Contains(f) ?? false);
                 grid.Rows[i].Visible = match;
             }
 
@@ -515,44 +426,45 @@ namespace BunnyBlack.Forms
             }
         }
 
-        // ============================================================
-        // КОНТЕКСТНОЕ МЕНЮ
-        // ============================================================
         private ContextMenuStrip BuildContextMenu()
         {
-            var m = new ContextMenuStrip { BackColor = Color.FromArgb(17, 17, 17), ForeColor = Color.FromArgb(216, 216, 216) };
+            var m = new ContextMenuStrip
+            {
+                BackColor = ThemeManager.PanelAlt,
+                ForeColor = ThemeManager.Foreground
+            };
 
-            var edit = new ToolStripMenuItem("Изменить значение");
+            var edit = new ToolStripMenuItem(Loc.T("autostart.menu.edit"));
             edit.Click += (s, e) => EditSelectedValue();
             m.Items.Add(edit);
 
-            var del = new ToolStripMenuItem("Удалить");
-            del.ForeColor = Color.FromArgb(255, 150, 150);
+            var del = new ToolStripMenuItem(Loc.T("autostart.menu.delete"));
+            del.ForeColor = ThemeManager.Danger;
             del.Click += (s, e) => DeleteSelected();
             m.Items.Add(del);
 
             m.Items.Add(new ToolStripSeparator());
 
-            var openLoc = new ToolStripMenuItem("Открыть расположение файла");
+            var openLoc = new ToolStripMenuItem(Loc.T("autostart.menu.location"));
             openLoc.Click += (s, e) => OpenFileLocation();
             m.Items.Add(openLoc);
 
-            var openReg = new ToolStripMenuItem("Открыть в редакторе реестра");
+            var openReg = new ToolStripMenuItem(Loc.T("autostart.menu.regedit"));
             openReg.Click += (s, e) => OpenInRegedit();
             m.Items.Add(openReg);
 
-            var copyName = new ToolStripMenuItem("Копировать полный путь");
+            var copyName = new ToolStripMenuItem(Loc.T("autostart.menu.copyfull"));
             copyName.Click += (s, e) => { var x = GetSelected(); if (x != null) Clipboard.SetText(x.FullName ?? ""); };
             m.Items.Add(copyName);
 
-            var copyVal = new ToolStripMenuItem("Копировать Value");
+            var copyVal = new ToolStripMenuItem(Loc.T("autostart.menu.copyval"));
             copyVal.Click += (s, e) => { var x = GetSelected(); if (x != null) Clipboard.SetText(x.Value ?? ""); };
             m.Items.Add(copyVal);
 
             m.Items.Add(new ToolStripSeparator());
 
-            var quar = new ToolStripMenuItem("В карантин (если файл)");
-            quar.ForeColor = Color.FromArgb(255, 200, 120);
+            var quar = new ToolStripMenuItem(Loc.T("autostart.menu.quar"));
+            quar.ForeColor = ThemeManager.Warning;
             quar.Click += (s, e) => SendSelectedToQuarantine();
             m.Items.Add(quar);
 
@@ -565,9 +477,6 @@ namespace BunnyBlack.Forms
             return grid.SelectedRows[0].Tag as Entry;
         }
 
-        // ============================================================
-        // ДЕЙСТВИЯ
-        // ============================================================
         private void EditValueInline(int rowIndex)
         {
             if (rowIndex < 0 || rowIndex >= grid.Rows.Count) return;
@@ -577,11 +486,11 @@ namespace BunnyBlack.Forms
 
             using (var dlg = new Form
             {
-                Text = "Изменить значение: " + e.ValueName,
+                Text = Loc.T("autostart.menu.edit") + ": " + e.ValueName,
                 Size = new Size(700, 160),
                 StartPosition = FormStartPosition.CenterParent,
-                BackColor = Color.FromArgb(13, 13, 13),
-                ForeColor = Color.FromArgb(216, 216, 216),
+                BackColor = ThemeManager.Background,
+                ForeColor = ThemeManager.Foreground,
                 TopMost = true,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MaximizeBox = false,
@@ -593,23 +502,44 @@ namespace BunnyBlack.Forms
                     Text = e.Value ?? "",
                     Location = new Point(12, 12),
                     Width = 660,
-                    BackColor = Color.FromArgb(24, 24, 24),
-                    ForeColor = Color.FromArgb(216, 216, 216),
+                    BackColor = ThemeManager.Input,
+                    ForeColor = ThemeManager.Foreground,
                     BorderStyle = BorderStyle.FixedSingle
                 };
-                var ok = new Button { Text = "OK", Location = new Point(560, 60), Size = new Size(110, 32), DialogResult = DialogResult.OK, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(35, 55, 75), ForeColor = Color.FromArgb(240, 240, 240) };
-                var cancel = new Button { Text = "Отмена", Location = new Point(440, 60), Size = new Size(110, 32), DialogResult = DialogResult.Cancel, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(22, 22, 22), ForeColor = Color.FromArgb(170, 170, 170) };
-                dlg.Controls.Add(tb); dlg.Controls.Add(ok); dlg.Controls.Add(cancel);
-                dlg.AcceptButton = ok; dlg.CancelButton = cancel;
+                var ok = new Button
+                {
+                    Text = Loc.T("btn.ok"),
+                    Location = new Point(560, 60),
+                    Size = new Size(110, 32),
+                    DialogResult = DialogResult.OK,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = ThemeManager.Accent,
+                    ForeColor = ThemeManager.AccentText
+                };
+                var cancel = new Button
+                {
+                    Text = Loc.T("btn.cancel"),
+                    Location = new Point(440, 60),
+                    Size = new Size(110, 32),
+                    DialogResult = DialogResult.Cancel,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = ThemeManager.PanelAlt,
+                    ForeColor = ThemeManager.Foreground
+                };
+                dlg.Controls.Add(tb);
+                dlg.Controls.Add(ok);
+                dlg.Controls.Add(cancel);
+                dlg.AcceptButton = ok;
+                dlg.CancelButton = cancel;
 
                 if (dlg.ShowDialog(FindOwner()) == DialogResult.OK)
                 {
                     if (WriteRegistryValue(e, tb.Text))
                     {
                         LoadData();
-                        NedoMessageBox.Show("Изменено.");
+                        NedoMessageBox.Show("OK");
                     }
-                    else NedoMessageBox.Show("Не удалось изменить.", isError: true);
+                    else NedoMessageBox.Show("Error", isError: true);
                 }
             }
         }
@@ -624,23 +554,25 @@ namespace BunnyBlack.Forms
         {
             try
             {
-                RegistryKey key = null;
+                Microsoft.Win32.RegistryKey key = null;
+                string path = e.KeyPath ?? "";
                 if (e.Hive == "HKLM")
                 {
-                    string path = e.KeyPath.StartsWith("SOFTWARE\\") || e.KeyPath.StartsWith("SYSTEM\\")
-                        ? e.KeyPath : "SOFTWARE\\" + e.KeyPath;
                     if (isWinRE)
                     {
-                        string prefix = path.StartsWith("SYSTEM\\") ? "BunnyBlack_Offline_SYSTEM\\" + path.Substring(7)
-                                     : path.StartsWith("SOFTWARE\\") ? "BunnyBlack_Offline_SOFTWARE\\" + path.Substring(9)
-                                     : path;
-                        key = Registry.LocalMachine.OpenSubKey(prefix, true);
+                        string prefix =
+                            path.StartsWith("SYSTEM\\", StringComparison.OrdinalIgnoreCase)
+                                ? "BunnyBlack_Offline_SYSTEM\\" + path.Substring(7)
+                                : path.StartsWith("SOFTWARE\\", StringComparison.OrdinalIgnoreCase)
+                                    ? "BunnyBlack_Offline_SOFTWARE\\" + path.Substring(9)
+                                    : "BunnyBlack_Offline_SOFTWARE\\" + path;
+                        key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(prefix, true);
                     }
-                    else key = Registry.LocalMachine.OpenSubKey(path, true);
+                    else key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(path, true);
                 }
                 else if (e.Hive == "HKCU")
                 {
-                    key = Registry.CurrentUser.OpenSubKey(e.KeyPath, true);
+                    key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(path, true);
                 }
 
                 if (key == null) return false;
@@ -656,30 +588,32 @@ namespace BunnyBlack.Forms
             var e = GetSelected();
             if (e == null || e.IsGroup) return;
 
-            if (MessageBoxHelper.Show($"Удалить '{e.FullName}'?", "Подтверждение",
+            if (MessageBoxHelper.Show($"Delete '{e.FullName}'?", Loc.T("warn.confirm"),
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
 
             try
             {
                 if (string.IsNullOrEmpty(e.ValueName)) return;
 
-                RegistryKey key = null;
+                Microsoft.Win32.RegistryKey key = null;
+                string path = e.KeyPath ?? "";
                 if (e.Hive == "HKLM")
                 {
-                    string path = e.KeyPath.StartsWith("SOFTWARE\\") || e.KeyPath.StartsWith("SYSTEM\\")
-                        ? e.KeyPath : "SOFTWARE\\" + e.KeyPath;
                     if (isWinRE)
                     {
-                        string prefix = path.StartsWith("SYSTEM\\") ? "BunnyBlack_Offline_SYSTEM\\" + path.Substring(7)
-                                     : path.StartsWith("SOFTWARE\\") ? "BunnyBlack_Offline_SOFTWARE\\" + path.Substring(9)
-                                     : path;
-                        key = Registry.LocalMachine.OpenSubKey(prefix, true);
+                        string prefix =
+                            path.StartsWith("SYSTEM\\", StringComparison.OrdinalIgnoreCase)
+                                ? "BunnyBlack_Offline_SYSTEM\\" + path.Substring(7)
+                                : path.StartsWith("SOFTWARE\\", StringComparison.OrdinalIgnoreCase)
+                                    ? "BunnyBlack_Offline_SOFTWARE\\" + path.Substring(9)
+                                    : "BunnyBlack_Offline_SOFTWARE\\" + path;
+                        key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(prefix, true);
                     }
-                    else key = Registry.LocalMachine.OpenSubKey(path, true);
+                    else key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(path, true);
                 }
                 else if (e.Hive == "HKCU")
                 {
-                    key = Registry.CurrentUser.OpenSubKey(e.KeyPath, true);
+                    key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(path, true);
                 }
 
                 if (key != null && key.GetValue(e.ValueName) != null)
@@ -687,17 +621,17 @@ namespace BunnyBlack.Forms
                     key.DeleteValue(e.ValueName);
                     key.Dispose();
                     LoadData();
-                    NedoMessageBox.Show("Удалено.");
+                    NedoMessageBox.Show(Loc.T("btn.delete"));
                 }
                 else
                 {
                     key?.Dispose();
-                    NedoMessageBox.Show("Значение не найдено или нет прав.", isError: true);
+                    NedoMessageBox.Show("Not found", isError: true);
                 }
             }
             catch (Exception ex)
             {
-                NedoMessageBox.Show("Ошибка: " + ex.Message, isError: true);
+                NedoMessageBox.Show("Error: " + ex.Message, isError: true);
             }
         }
 
@@ -721,10 +655,10 @@ namespace BunnyBlack.Forms
                     if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
                         Process.Start(dir);
                     else
-                        NedoMessageBox.Show("Не найдено: " + path, isError: true);
+                        NedoMessageBox.Show("Not found: " + path, isError: true);
                 }
             }
-            catch (Exception ex) { NedoMessageBox.Show("Ошибка: " + ex.Message, isError: true); }
+            catch (Exception ex) { NedoMessageBox.Show("Error: " + ex.Message, isError: true); }
         }
 
         private void OpenInRegedit()
@@ -741,7 +675,7 @@ namespace BunnyBlack.Forms
             string path = e.FilePathHint.Trim('"');
             if (!File.Exists(path))
             {
-                NedoMessageBox.Show("Файл не найден: " + path, isError: true);
+                NedoMessageBox.Show("Not found: " + path, isError: true);
                 return;
             }
 
@@ -749,19 +683,26 @@ namespace BunnyBlack.Forms
             if (Quarantine.Add(path, "Из автозагрузки: " + e.FullName, out err))
             {
                 LoadData();
-                NedoMessageBox.Show("Файл в карантине.");
+                NedoMessageBox.Show("Quarantined");
             }
-            else NedoMessageBox.Show("Ошибка: " + err, isError: true);
+            else NedoMessageBox.Show("Error: " + err, isError: true);
         }
 
-        // ============================================================
-        // ХЕЛПЕРЫ
-        // ============================================================
         private Form FindOwner()
         {
             foreach (Form f in Application.OpenForms)
                 if (f is MainForm) return f;
             return Form.ActiveForm;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.ThemeChanged -= ApplyTheme;
+                Loc.LanguageChanged -= ApplyLanguage;
+            }
+            base.Dispose(disposing);
         }
     }
 }

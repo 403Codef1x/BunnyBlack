@@ -1,51 +1,68 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
-    <Nullable>disable</Nullable>
-    <ImplicitUsings>disable</ImplicitUsings>
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <LangVersion>8.0</LangVersion>
-    <ApplicationIcon>bunny_icon.ico</ApplicationIcon>
-    <PlatformTarget>x64</PlatformTarget>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
-    <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <DebugType>none</DebugType>
-    <DebugSymbols>false</DebugSymbols>
-    <PublishDir>$(OutputPath)</PublishDir>
-    <ReleaseSingleFileDir>$(MSBuildProjectDirectory)\bin\Release\single\</ReleaseSingleFileDir>
-  </PropertyGroup>
-  <ItemGroup>
-    <Content Include="bunny_icon.ico" />
-  </ItemGroup>
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
-    <PackageReference Include="System.Management" Version="8.0.0" />
-    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
-    <PackageReference Include="TaskScheduler" Version="2.12.2" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Update="Properties\Settings.Designer.cs">
-      <DesignTimeSharedInput>True</DesignTimeSharedInput>
-      <AutoGen>True</AutoGen>
-      <DependentUpon>Settings.settings</DependentUpon>
-    </Compile>
-  </ItemGroup>
-  <ItemGroup>
-    <None Update="Properties\Settings.settings">
-      <Generator>SettingsSingleFileGenerator</Generator>
-      <LastGenOutput>Settings.Designer.cs</LastGenOutput>
-    </None>
-  </ItemGroup>
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<UseWindowsForms>true</UseWindowsForms>
+		<Nullable>disable</Nullable>
+		<ImplicitUsings>disable</ImplicitUsings>
 
-  <Target Name="CopySingleFileRelease" AfterTargets="Publish" Condition="'$(Configuration)' == 'Release'">
-    <MakeDir Directories="$(ReleaseSingleFileDir)" />
-    <Copy SourceFiles="$(PublishDir)BunnyBlack.exe" DestinationFiles="$(ReleaseSingleFileDir)BunnyBlack.exe" OverwriteReadOnlyFiles="true" />
-  </Target>
+		<!-- ============================================================ -->
+		<!-- ВЕРСИЯ — поднимай при каждом релизе                         -->
+		<!-- ============================================================ -->
+		<Version>3.2.3</Version>
+		<AssemblyVersion>3.2.3.0</AssemblyVersion>
+		<FileVersion>3.2.3.0</FileVersion>
+		<InformationalVersion>3.2.3</InformationalVersion>
 
+		<!-- GenerateAssemblyInfo=false: атрибуты версии пишем сами вручную
+         (см. ниже — Properties/AssemblyInfo.cs), либо отключаем и
+         полагаемся на автоматику. Здесь оставляем false, но создаём
+         отдельный файл AssemblyInfo.cs со всеми атрибутами. -->
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+
+		<LangVersion>8.0</LangVersion>
+		<ApplicationIcon>bunny_icon.ico</ApplicationIcon>
+		<PlatformTarget>x64</PlatformTarget>
+		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
+		<SelfContained>true</SelfContained>
+		<PublishSingleFile>true</PublishSingleFile>
+		<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+		<EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+		<DebugType>none</DebugType>
+		<DebugSymbols>false</DebugSymbols>
+		<PublishDir>$(OutputPath)</PublishDir>
+		<ReleaseSingleFileDir>$(MSBuildProjectDirectory)\bin\Release\single\</ReleaseSingleFileDir>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Content Include="bunny_icon.ico" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+		<PackageReference Include="System.Management" Version="8.0.0" />
+		<PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
+		<PackageReference Include="TaskScheduler" Version="2.12.2" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Compile Update="Properties\Settings.Designer.cs">
+			<DesignTimeSharedInput>True</DesignTimeSharedInput>
+			<AutoGen>True</AutoGen>
+			<DependentUpon>Settings.settings</DependentUpon>
+		</Compile>
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Update="Properties\Settings.settings">
+			<Generator>SettingsSingleFileGenerator</Generator>
+			<LastGenOutput>Settings.Designer.cs</LastGenOutput>
+		</None>
+	</ItemGroup>
+
+	<Target Name="CopySingleFileRelease" AfterTargets="Publish" Condition="'$(Configuration)' == 'Release'">
+		<MakeDir Directories="$(ReleaseSingleFileDir)" />
+		<Copy SourceFiles="$(PublishDir)BunnyBlack.exe" DestinationFiles="$(ReleaseSingleFileDir)BunnyBlack.exe" OverwriteReadOnlyFiles="true" />
+	</Target>
 </Project>

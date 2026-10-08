@@ -1,9 +1,4 @@
 ﻿// language: C#, file: Forms/UsersForm.cs
-// Полная замена.
-// - OEM-866 встроена прямо в класс (GetOemEncoding) — внешний EncodingHelper не нужен.
-// - ExecuteNetCommand не падает на GetEncoding(866).
-// - Удаление, создание, смена пароля, вкл/выкл — работают.
-// - Колонки: Имя, Статус.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -23,6 +18,7 @@ namespace BunnyBlack.Forms
         private FlowLayoutPanel topBar;
         private TextBox filterBox;
         private Label statusLabel;
+        private Label titleLabel;
         private bool isWinRE;
 
         private readonly List<RegistryHelper.UserEntry> users = new List<RegistryHelper.UserEntry>();
@@ -33,8 +29,7 @@ namespace BunnyBlack.Forms
         private static readonly HashSet<string> SkipNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "administrator", "guest", "defaultaccount", "wdagutilityaccount",
-            "defaultuser0", "defaultuser1",
-            "администратор", "гость",
+            "defaultuser0", "defaultuser1", "администратор", "гость",
             "default", "default user", "all users",
             "все пользователи", "всё пользователи", "общие",
             "public", "$recycle.bin", "defaultapppool",
@@ -45,17 +40,40 @@ namespace BunnyBlack.Forms
 
         private static readonly HashSet<string> ProtectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "administrator", "guest",
-            "администратор", "гость"
+            "administrator", "guest", "администратор", "гость"
         };
 
         public UsersForm(bool winRE)
         {
             isWinRE = winRE;
-            this.BackColor = Color.FromArgb(13, 13, 13);
-            this.ForeColor = Color.FromArgb(216, 216, 216);
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
             InitializeComponent();
             LoadUsersAsync();
+
+            ThemeManager.ThemeChanged += ApplyTheme;
+            Loc.LanguageChanged += ApplyLanguage;
+        }
+
+        public void ApplyTheme()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyTheme)); return; }
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
+            ThemeHelper.Apply(this);
+            Invalidate(true);
+        }
+
+        public void ApplyLanguage()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyLanguage)); return; }
+            if (titleLabel != null) titleLabel.Text = Loc.T("users.title");
+            if (grid != null && grid.Columns.Count >= 2)
+            {
+                grid.Columns[0].HeaderText = Loc.T("users.col.name");
+                grid.Columns[1].HeaderText = Loc.T("users.col.status");
+            }
+            Invalidate(true);
         }
 
         private void InitializeComponent()
@@ -68,21 +86,21 @@ namespace BunnyBlack.Forms
                 ColumnCount = 1,
                 RowCount = 3,
                 Padding = new Padding(28, 24, 28, 20),
-                BackColor = Color.FromArgb(13, 13, 13)
+                BackColor = ThemeManager.Background
             };
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            var title = new Label
+            titleLabel = new Label
             {
-                Text = "Пользователи" + (isWinRE ? " (WinRE)" : ""),
+                Text = Loc.T("users.title"),
                 Font = new Font("Segoe UI", 18, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                ForeColor = ThemeManager.Foreground,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent
             };
-            layout.Controls.Add(title, 0, 0);
+            layout.Controls.Add(titleLabel, 0, 0);
 
             topBar = new FlowLayoutPanel
             {
@@ -96,8 +114,8 @@ namespace BunnyBlack.Forms
             filterBox = new TextBox
             {
                 Width = 220,
-                BackColor = Color.FromArgb(24, 24, 24),
-                ForeColor = Color.FromArgb(216, 216, 216),
+                BackColor = ThemeManager.Input,
+                ForeColor = ThemeManager.Foreground,
                 BorderStyle = BorderStyle.FixedSingle,
                 Font = new Font("Segoe UI", 10),
                 Margin = new Padding(0, 4, 8, 0)
@@ -105,30 +123,30 @@ namespace BunnyBlack.Forms
             filterBox.TextChanged += (s, e) => ApplyFilter();
             topBar.Controls.Add(filterBox);
 
-            var refreshBtn = MakeButton("Обновить", 100, Color.FromArgb(30, 30, 30), Color.FromArgb(220, 220, 220));
+            var refreshBtn = MakeButton(Loc.T("btn.refresh"), 100, ThemeManager.PanelAlt, ThemeManager.Foreground);
             refreshBtn.Click += (s, e) => LoadUsersAsync();
             topBar.Controls.Add(refreshBtn);
 
-            var createBtn = MakeButton("Создать", 100, Color.FromArgb(30, 55, 40), Color.FromArgb(136, 221, 170));
+            var createBtn = MakeButton(Loc.T("btn.create"), 100, ThemeManager.SuccessBack, ThemeManager.Success);
             createBtn.Click += (s, e) => CreateUser();
             topBar.Controls.Add(createBtn);
 
-            var delBtn = MakeButton("Удалить", 100, Color.FromArgb(50, 20, 20), Color.FromArgb(255, 150, 150));
+            var delBtn = MakeButton(Loc.T("btn.delete"), 100, ThemeManager.DangerBack, ThemeManager.Danger);
             delBtn.Click += (s, e) => DeleteSelected();
             topBar.Controls.Add(delBtn);
 
-            var passBtn = MakeButton("Сменить пароль", 150, Color.FromArgb(30, 30, 30), Color.FromArgb(220, 220, 220));
+            var passBtn = MakeButton(Loc.T("users.change"), 150, ThemeManager.PanelAlt, ThemeManager.Foreground);
             passBtn.Click += (s, e) => ChangePassword();
             topBar.Controls.Add(passBtn);
 
-            var toggleBtn = MakeButton("Вкл/Выкл", 110, Color.FromArgb(40, 40, 60), Color.FromArgb(170, 180, 255));
+            var toggleBtn = MakeButton(Loc.T("users.toggle"), 110, ThemeManager.PanelAlt, ThemeManager.Foreground);
             toggleBtn.Click += (s, e) => ToggleSelected();
             topBar.Controls.Add(toggleBtn);
 
             statusLabel = new Label
             {
                 Text = "",
-                ForeColor = Color.FromArgb(120, 120, 120),
+                ForeColor = ThemeManager.Muted,
                 Font = new Font("Segoe UI", 9),
                 AutoSize = true,
                 BackColor = Color.Transparent,
@@ -141,10 +159,10 @@ namespace BunnyBlack.Forms
             grid = new DataGridView
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(13, 13, 13),
-                ForeColor = Color.FromArgb(216, 216, 216),
-                BackgroundColor = Color.FromArgb(13, 13, 13),
-                GridColor = Color.FromArgb(40, 40, 40),
+                BackColor = ThemeManager.Background,
+                ForeColor = ThemeManager.Foreground,
+                BackgroundColor = ThemeManager.Background,
+                GridColor = ThemeManager.Border,
                 BorderStyle = BorderStyle.None,
                 RowHeadersVisible = false,
                 AllowUserToAddRows = false,
@@ -167,17 +185,17 @@ namespace BunnyBlack.Forms
                 System.Reflection.BindingFlags.NonPublic,
                 null, grid, new object[] { true });
 
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(25, 25, 25);
-            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(200, 200, 200);
+            grid.ColumnHeadersDefaultCellStyle.BackColor = ThemeManager.Header;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = ThemeManager.Foreground;
             grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10, FontStyle.Bold);
-            grid.DefaultCellStyle.BackColor = Color.FromArgb(18, 18, 18);
-            grid.DefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(40, 50, 60);
-            grid.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 255, 255);
-            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(14, 14, 14);
+            grid.DefaultCellStyle.BackColor = ThemeManager.Row;
+            grid.DefaultCellStyle.ForeColor = ThemeManager.Foreground;
+            grid.DefaultCellStyle.SelectionBackColor = ThemeManager.Selection;
+            grid.DefaultCellStyle.SelectionForeColor = ThemeManager.SelectionText;
+            grid.AlternatingRowsDefaultCellStyle.BackColor = ThemeManager.RowAlt;
 
-            grid.Columns.Add("Name", "Имя");
-            grid.Columns.Add("Status", "Статус");
+            grid.Columns.Add("Name", Loc.T("users.col.name"));
+            grid.Columns.Add("Status", Loc.T("users.col.status"));
             grid.Columns[0].FillWeight = 70;
             grid.Columns[1].FillWeight = 30;
             grid.Columns[1].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
@@ -199,7 +217,7 @@ namespace BunnyBlack.Forms
                 FlatStyle = FlatStyle.Flat,
                 BackColor = back,
                 ForeColor = fore,
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(60, 60, 60) },
+                FlatAppearance = { BorderSize = 1, BorderColor = ThemeManager.Border },
                 Cursor = Cursors.Hand,
                 Font = new Font("Segoe UI", 9),
                 Margin = new Padding(0, 2, 8, 0)
@@ -208,30 +226,34 @@ namespace BunnyBlack.Forms
 
         private ContextMenuStrip BuildContextMenu()
         {
-            var m = new ContextMenuStrip { BackColor = Color.FromArgb(17, 17, 17), ForeColor = Color.FromArgb(216, 216, 216) };
+            var m = new ContextMenuStrip
+            {
+                BackColor = ThemeManager.PanelAlt,
+                ForeColor = ThemeManager.Foreground
+            };
 
-            var create = new ToolStripMenuItem("Создать пользователя");
+            var create = new ToolStripMenuItem(Loc.T("btn.create"));
             create.Click += (s, e) => CreateUser();
             m.Items.Add(create);
 
-            var del = new ToolStripMenuItem("Удалить");
-            del.ForeColor = Color.FromArgb(255, 150, 150);
+            var del = new ToolStripMenuItem(Loc.T("btn.delete"));
+            del.ForeColor = ThemeManager.Danger;
             del.Click += (s, e) => DeleteSelected();
             m.Items.Add(del);
 
-            var pass = new ToolStripMenuItem("Сменить пароль");
+            var pass = new ToolStripMenuItem(Loc.T("users.change"));
             pass.Click += (s, e) => ChangePassword();
             m.Items.Add(pass);
 
             m.Items.Add(new ToolStripSeparator());
 
-            var en = new ToolStripMenuItem("Включить");
-            en.ForeColor = Color.FromArgb(136, 221, 170);
+            var en = new ToolStripMenuItem("On");
+            en.ForeColor = ThemeManager.Success;
             en.Click += (s, e) => SetActive(true);
             m.Items.Add(en);
 
-            var dis = new ToolStripMenuItem("Отключить");
-            dis.ForeColor = Color.FromArgb(255, 150, 150);
+            var dis = new ToolStripMenuItem("Off");
+            dis.ForeColor = ThemeManager.Danger;
             dis.Click += (s, e) => SetActive(false);
             m.Items.Add(dis);
 
@@ -240,7 +262,7 @@ namespace BunnyBlack.Forms
 
         private async void LoadUsersAsync()
         {
-            statusLabel.Text = "Загрузка…";
+            statusLabel.Text = Loc.T("status.loading");
             grid.Rows.Clear();
             users.Clear();
 
@@ -250,42 +272,50 @@ namespace BunnyBlack.Forms
 
                 this.Invoke((Action)(() =>
                 {
+                    int total = list == null ? 0 : list.Count;
+                    int skipped = 0;
                     int shown = 0;
-                    foreach (var u in list)
-                    {
-                        if (SkipNames.Contains(u.Name)) continue;
-                        if (string.IsNullOrWhiteSpace(u.Name)) continue;
 
-                        users.Add(u);
-                        AddRow(u);
-                        shown++;
+                    if (list != null)
+                    {
+                        foreach (var u in list)
+                        {
+                            if (string.IsNullOrWhiteSpace(u.Name)) { skipped++; continue; }
+                            if (SkipNames.Contains(u.Name.Trim())) { skipped++; continue; }
+
+                            users.Add(u);
+                            AddRow(u);
+                            shown++;
+                        }
                     }
-                    statusLabel.Text = $"Пользователей: {shown}";
+
+                    statusLabel.Text = $"Shown: {shown} (total: {total}, skipped: {skipped})";
                     ApplyFilter();
                 }));
             }
             catch (Exception ex)
             {
-                statusLabel.Text = "Ошибка: " + ex.Message;
+                BbLog.Error("[LoadUsersAsync]", ex);
+                statusLabel.Text = "Error: " + ex.Message;
             }
         }
 
         private void AddRow(RegistryHelper.UserEntry u)
         {
-            int idx = grid.Rows.Add(u.Name, u.Disabled ? "Отключён" : "Включён");
+            int idx = grid.Rows.Add(u.Name, u.Disabled ? Loc.T("users.disabled") : Loc.T("users.enabled"));
             var row = grid.Rows[idx];
             row.Tag = u;
 
             if (u.Disabled)
             {
-                row.Cells[1].Style.ForeColor = Color.FromArgb(255, 150, 150);
+                row.Cells[1].Style.ForeColor = ThemeManager.Danger;
                 row.Cells[1].Style.Font = new Font("Segoe UI", 9, FontStyle.Bold);
             }
-            else row.Cells[1].Style.ForeColor = Color.FromArgb(136, 221, 170);
+            else row.Cells[1].Style.ForeColor = ThemeManager.Success;
 
             if (u.RID == 500 || u.IsAdmin)
             {
-                row.Cells[0].Style.ForeColor = Color.FromArgb(255, 200, 120);
+                row.Cells[0].Style.ForeColor = ThemeManager.Warning;
                 row.Cells[0].Style.Font = new Font("Segoe UI", 9, FontStyle.Bold);
             }
         }
@@ -303,93 +333,73 @@ namespace BunnyBlack.Forms
 
         private void CreateUser()
         {
-            var name = ShowInputDialog("Создать пользователя", "Имя пользователя:");
+            var name = ShowInputDialog(Loc.T("btn.create"), "Name:");
             if (string.IsNullOrEmpty(name)) return;
 
             string err;
             if (!IsValidUsername(name, out err)) { NedoMessageBox.Show(err, isError: true); return; }
-            if (ProtectedNames.Contains(name)) { NedoMessageBox.Show("Защищённое имя.", isError: true); return; }
+            if (ProtectedNames.Contains(name)) { NedoMessageBox.Show("Protected.", isError: true); return; }
 
-            var pass = ShowInputDialog("Создать пользователя", "Пароль:", true);
-            if (string.IsNullOrEmpty(pass)) { NedoMessageBox.Show("Пароль не может быть пустым.", isError: true); return; }
+            var pass = ShowInputDialog(Loc.T("btn.create"), "Password:", true);
+            if (string.IsNullOrEmpty(pass)) { NedoMessageBox.Show("Empty password.", isError: true); return; }
 
             string cmdErr;
             if (ExecuteNetCommand($"user \"{name}\" \"{pass}\" /add", out cmdErr))
             {
                 ExecuteNetCommand($"user \"{name}\" \"{pass}\"", out _);
-                NedoMessageBox.Show($"Пользователь '{name}' создан.");
+                NedoMessageBox.Show($"Created: {name}");
                 LoadUsersAsync();
             }
             else
             {
-                NedoMessageBox.Show("Ошибка создания: " + cmdErr, isError: true);
+                NedoMessageBox.Show("Error: " + cmdErr, isError: true);
             }
         }
 
         private void DeleteSelected()
         {
             var u = GetSelected();
-            if (u == null)
-            {
-                NedoMessageBox.Show("Выбери пользователя в списке.", isError: true);
-                return;
-            }
-
+            if (u == null) return;
             if (ProtectedNames.Contains(u.Name) || u.RID == 500)
             {
-                NedoMessageBox.Show($"'{u.Name}' — защищённый аккаунт, удалить нельзя.", isError: true);
+                NedoMessageBox.Show($"'{u.Name}' protected.", isError: true);
                 return;
             }
 
-            if (MessageBoxHelper.Show($"Удалить пользователя '{u.Name}'?",
-                "Подтверждение", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            if (MessageBoxHelper.Show($"Delete '{u.Name}'?", Loc.T("warn.confirm"),
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
 
             string err;
-            if (!ExecuteNetCommand($"user \"{u.Name}\" /delete", out err))
+            if (ExecuteNetCommand($"user \"{u.Name}\" /delete", out err))
             {
-                NedoMessageBox.Show("Не удалось удалить:\n" + err, isError: true);
-                return;
+                NedoMessageBox.Show($"Deleted: {u.Name}");
+                LoadUsersAsync();
             }
-
-            try
+            else
             {
-                string drive = RegistryHelper.GetSystemDrive();
-                string profile = Path.Combine(drive, "Users", u.Name);
-                if (Directory.Exists(profile) &&
-                    profile.IndexOf("systemprofile", StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    if (MessageBoxHelper.Show($"Удалить папку профиля?\n{profile}",
-                        "Профиль", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-                    {
-                        try { Directory.Delete(profile, true); } catch { }
-                    }
-                }
+                NedoMessageBox.Show("Error: " + err, isError: true);
             }
-            catch { }
-
-            NedoMessageBox.Show($"Пользователь '{u.Name}' удалён.");
-            LoadUsersAsync();
         }
 
         private void ChangePassword()
         {
             var u = GetSelected();
-            if (u == null) { NedoMessageBox.Show("Выбери пользователя.", isError: true); return; }
+            if (u == null) return;
 
-            var pass = ShowInputDialog("Смена пароля", $"Новый пароль для '{u.Name}':", true);
+            var pass = ShowInputDialog(Loc.T("users.change"), $"New password for '{u.Name}':", true);
             if (string.IsNullOrEmpty(pass)) return;
 
             string err;
             if (ExecuteNetCommand($"user \"{u.Name}\" \"{pass}\"", out err))
-                NedoMessageBox.Show("Пароль изменён.");
+                NedoMessageBox.Show("Password changed.");
             else
-                NedoMessageBox.Show("Ошибка смены пароля:\n" + err, isError: true);
+                NedoMessageBox.Show("Error: " + err, isError: true);
         }
 
         private void ToggleSelected()
         {
             var u = GetSelected();
-            if (u == null) { NedoMessageBox.Show("Выбери пользователя.", isError: true); return; }
+            if (u == null) return;
             SetActive(u.Disabled);
         }
 
@@ -401,10 +411,10 @@ namespace BunnyBlack.Forms
             string err;
             if (ExecuteNetCommand($"user \"{u.Name}\" /active:{(enable ? "yes" : "no")}", out err))
             {
-                NedoMessageBox.Show($"{(enable ? "Включён" : "Отключён")}: {u.Name}");
+                NedoMessageBox.Show($"{(enable ? "Enabled" : "Disabled")}: {u.Name}");
                 LoadUsersAsync();
             }
-            else NedoMessageBox.Show("Ошибка:\n" + err, isError: true);
+            else NedoMessageBox.Show("Error: " + err, isError: true);
         }
 
         private RegistryHelper.UserEntry GetSelected()
@@ -413,14 +423,13 @@ namespace BunnyBlack.Forms
             return grid.SelectedRows[0].Tag as RegistryHelper.UserEntry;
         }
 
-        // ============================================================
-        // EXECUTE NET — с безопасной кодировкой
-        // ============================================================
         private bool ExecuteNetCommand(string args, out string error)
         {
             error = null;
             try
             {
+                Encoding enc = GetOemEncoding();
+
                 var psi = new ProcessStartInfo
                 {
                     FileName = "net.exe",
@@ -431,7 +440,6 @@ namespace BunnyBlack.Forms
                     RedirectStandardError = true
                 };
 
-                Encoding enc = GetOemEncoding();
                 if (enc != null)
                 {
                     psi.StandardOutputEncoding = enc;
@@ -440,7 +448,7 @@ namespace BunnyBlack.Forms
 
                 using (var p = Process.Start(psi))
                 {
-                    if (p == null) { error = "net.exe не запустился"; return false; }
+                    if (p == null) { error = "net.exe not started"; return false; }
 
                     string stdout = "", stderr = "";
                     try { stdout = p.StandardOutput.ReadToEnd(); } catch { }
@@ -449,25 +457,19 @@ namespace BunnyBlack.Forms
                     if (!p.WaitForExit(8000))
                     {
                         try { p.Kill(); } catch { }
-                        error = "Таймаут net.exe";
+                        error = "Timeout";
                         return false;
                     }
 
                     string combined = (stdout + "\n" + stderr).Trim();
-
-                    if (p.ExitCode != 0)
-                    {
-                        error = CleanNetError(combined);
-                        return false;
-                    }
+                    if (p.ExitCode != 0) { error = CleanNetError(combined); return false; }
 
                     string lower = combined.ToLowerInvariant();
                     if (lower.Contains("отказано") || lower.Contains("denied") ||
                         lower.Contains("системная ошибка") || lower.Contains("system error") ||
                         lower.Contains("не найден") || lower.Contains("not found") ||
                         lower.Contains("уже существует") || lower.Contains("already exists") ||
-                        lower.Contains("не соответствует") || lower.Contains("does not meet") ||
-                        lower.Contains("ошибка") || lower.Contains("error"))
+                        lower.Contains("не соответствует") || lower.Contains("does not meet"))
                     {
                         error = CleanNetError(combined);
                         return false;
@@ -479,9 +481,6 @@ namespace BunnyBlack.Forms
             catch (Exception ex) { error = ex.Message; return false; }
         }
 
-        // ============================================================
-        // OEM-кодировка с безопасным фоллбэком — без внешнего хелпера
-        // ============================================================
         private static Encoding GetOemEncoding()
         {
             try
@@ -498,29 +497,22 @@ namespace BunnyBlack.Forms
 
         private string CleanNetError(string raw)
         {
-            if (string.IsNullOrEmpty(raw))
-            {
-                int code = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                if (code == 5) return "Отказано в доступе. Запусти программу от имени администратора.";
-                if (code == 2) return "Пользователь не найден.";
-                return "неизвестная ошибка (net.exe вернул пустой ответ)";
-            }
-
+            if (string.IsNullOrEmpty(raw)) return "unknown error";
             string s = raw.Replace("\r", "").Replace("\n", " ").Trim();
-            return s.Length > 500 ? s.Substring(0, 500) + "…" : s;
+            return s.Length > 400 ? s.Substring(0, 400) + "…" : s;
         }
 
         private bool IsValidUsername(string name, out string error)
         {
             error = null;
-            if (string.IsNullOrWhiteSpace(name)) { error = "Имя не может быть пустым."; return false; }
-            if (name.Length > 20) { error = "Имя длиннее 20 символов."; return false; }
+            if (string.IsNullOrWhiteSpace(name)) { error = "Empty name."; return false; }
+            if (name.Length > 20) { error = "Name > 20 chars."; return false; }
             if (InvalidNameChars.IsMatch(name))
             {
-                error = "Имя не может содержать пробелы и символы: \\ / : * ? \" < > |";
+                error = "Invalid chars.";
                 return false;
             }
-            if (name.EndsWith(".")) { error = "Имя не может заканчиваться точкой."; return false; }
+            if (name.EndsWith(".")) { error = "Ends with dot."; return false; }
             return true;
         }
 
@@ -531,8 +523,8 @@ namespace BunnyBlack.Forms
                 Text = title,
                 Size = new Size(420, 160),
                 StartPosition = FormStartPosition.CenterParent,
-                BackColor = Color.FromArgb(13, 13, 13),
-                ForeColor = Color.FromArgb(216, 216, 216),
+                BackColor = ThemeManager.Background,
+                ForeColor = ThemeManager.Foreground,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MaximizeBox = false,
                 MinimizeBox = false,
@@ -546,7 +538,7 @@ namespace BunnyBlack.Forms
                     Left = 20,
                     Top = 20,
                     Width = 370,
-                    ForeColor = Color.FromArgb(216, 216, 216),
+                    ForeColor = ThemeManager.Foreground,
                     BackColor = Color.Transparent
                 };
 
@@ -555,36 +547,36 @@ namespace BunnyBlack.Forms
                     Left = 20,
                     Top = 50,
                     Width = 370,
-                    BackColor = Color.FromArgb(24, 24, 24),
-                    ForeColor = Color.FromArgb(216, 216, 216),
+                    BackColor = ThemeManager.Input,
+                    ForeColor = ThemeManager.Foreground,
                     BorderStyle = BorderStyle.FixedSingle
                 };
                 if (password) tb.PasswordChar = '•';
 
                 var ok = new Button
                 {
-                    Text = "OK",
+                    Text = Loc.T("btn.ok"),
                     Left = 220,
                     Top = 85,
                     Width = 80,
                     Height = 30,
                     DialogResult = DialogResult.OK,
                     FlatStyle = FlatStyle.Flat,
-                    BackColor = Color.FromArgb(35, 55, 75),
-                    ForeColor = Color.FromArgb(240, 240, 240)
+                    BackColor = ThemeManager.Accent,
+                    ForeColor = ThemeManager.AccentText
                 };
 
                 var cancel = new Button
                 {
-                    Text = "Отмена",
+                    Text = Loc.T("btn.cancel"),
                     Left = 310,
                     Top = 85,
                     Width = 80,
                     Height = 30,
                     DialogResult = DialogResult.Cancel,
                     FlatStyle = FlatStyle.Flat,
-                    BackColor = Color.FromArgb(22, 22, 22),
-                    ForeColor = Color.FromArgb(170, 170, 170)
+                    BackColor = ThemeManager.PanelAlt,
+                    ForeColor = ThemeManager.Foreground
                 };
 
                 form.Controls.Add(label);
@@ -605,6 +597,16 @@ namespace BunnyBlack.Forms
             foreach (Form f in Application.OpenForms)
                 if (f is MainForm) return f;
             return Form.ActiveForm;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.ThemeChanged -= ApplyTheme;
+                Loc.LanguageChanged -= ApplyLanguage;
+            }
+            base.Dispose(disposing);
         }
     }
 }

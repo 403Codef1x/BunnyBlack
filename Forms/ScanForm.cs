@@ -1,16 +1,6 @@
 ﻿// language: C#, file: Forms/ScanForm.cs
-// Полная замена.
-// ФИКС: в WinRE проверка/удаление политик идёт через оффлайн-кусты (HKLM + HKCU).
-// - HKCU в WinRE читаем из BunnyBlack_Offline_HKCU (NTUSER.DAT), fallback на SOFTWARE.
-// - HKLM в WinRE читаем из BunnyBlack_Offline_SOFTWARE.
-// - Дублируем проверки в machine-wide Policies (HKLM), которые выставляются через оффлайн.
-// - п.2  — handle guard в BeginAutoScan.
-// - п.6  — батч-обновление грида.
-// - п.16 — ProgressBar.
-// - п.20 — hosts через system drive.
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Text;
@@ -29,6 +19,7 @@ namespace BunnyBlack.Forms
         private Button scanButton;
         private Button fixButton;
         private ProgressBar scanProgress;
+        private Label titleLabel;
         private bool isScanning = false;
         private bool isScanCompleted = false;
 
@@ -39,10 +30,9 @@ namespace BunnyBlack.Forms
             public string Name { get; set; }
             public string Description { get; set; }
             public string Risk { get; set; }
-            public string Hive { get; set; }         // "HKLM" | "HKCU"
+            public string Hive { get; set; }
             public string Path { get; set; }
             public string ValueName { get; set; }
-            public object ValueData { get; set; }
             public string RepairMethod { get; set; }
         }
 
@@ -50,9 +40,37 @@ namespace BunnyBlack.Forms
 
         public ScanForm(bool winRE)
         {
-            this.BackColor = Color.FromArgb(13, 13, 13);
-            this.ForeColor = Color.FromArgb(216, 216, 216);
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
             InitializeComponent();
+
+            ThemeManager.ThemeChanged += ApplyTheme;
+            Loc.LanguageChanged += ApplyLanguage;
+        }
+
+        public void ApplyTheme()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyTheme)); return; }
+            this.BackColor = ThemeManager.Background;
+            this.ForeColor = ThemeManager.Foreground;
+            ThemeHelper.Apply(this);
+            Invalidate(true);
+        }
+
+        public void ApplyLanguage()
+        {
+            if (InvokeRequired) { Invoke(new Action(ApplyLanguage)); return; }
+            if (titleLabel != null) titleLabel.Text = Loc.T("scan.title");
+            if (autoFixCheck != null) autoFixCheck.Text = Loc.T("scan.autofix");
+            if (scanButton != null && !isScanning) scanButton.Text = Loc.T("scan.start");
+            if (fixButton != null) fixButton.Text = Loc.T("scan.fixall");
+            if (grid != null && grid.Columns.Count >= 3)
+            {
+                grid.Columns[0].HeaderText = "Угроза";
+                grid.Columns[1].HeaderText = "Описание";
+                grid.Columns[2].HeaderText = "Риск";
+            }
+            Invalidate(true);
         }
 
         public void BeginAutoScan()
@@ -69,15 +87,14 @@ namespace BunnyBlack.Forms
         private void InitializeComponent()
         {
             this.Dock = DockStyle.Fill;
-            this.BackColor = Color.FromArgb(13, 13, 13);
 
-            TableLayoutPanel mainLayout = new TableLayoutPanel
+            var mainLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 6,
                 Padding = new Padding(20),
-                BackColor = Color.FromArgb(13, 13, 13)
+                BackColor = ThemeManager.Background
             };
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -86,21 +103,21 @@ namespace BunnyBlack.Forms
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
 
-            Label title = new Label
+            titleLabel = new Label
             {
-                Text = "Сканирование системы",
+                Text = Loc.T("scan.title"),
                 Font = new Font("Segoe UI", 18, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                ForeColor = ThemeManager.Foreground,
                 Dock = DockStyle.Fill,
                 BackColor = Color.Transparent,
                 TextAlign = ContentAlignment.MiddleLeft
             };
-            mainLayout.Controls.Add(title, 0, 0);
+            mainLayout.Controls.Add(titleLabel, 0, 0);
 
             autoFixCheck = new CheckBox
             {
-                Text = "Автоматически исправлять найденные нарушения",
-                ForeColor = Color.FromArgb(216, 216, 216),
+                Text = Loc.T("scan.autofix"),
+                ForeColor = ThemeManager.Foreground,
                 Font = new Font("Segoe UI", 10),
                 BackColor = Color.Transparent,
                 Dock = DockStyle.Fill,
@@ -130,39 +147,39 @@ namespace BunnyBlack.Forms
             grid.ReadOnly = true;
             grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
 
-            Panel gridPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(13, 13, 13) };
+            var gridPanel = new Panel { Dock = DockStyle.Fill, BackColor = ThemeManager.Background };
             gridPanel.Controls.Add(grid);
             mainLayout.Controls.Add(gridPanel, 0, 3);
 
             logBox = new RichTextBox
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(13, 13, 13),
-                ForeColor = Color.FromArgb(200, 200, 200),
+                BackColor = ThemeManager.Background,
+                ForeColor = ThemeManager.Foreground,
                 BorderStyle = BorderStyle.None,
                 Font = new Font("Consolas", 10),
                 ReadOnly = true,
                 WordWrap = false,
                 ScrollBars = RichTextBoxScrollBars.Vertical
             };
-            Panel logPanel = new Panel
+            var logPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(13, 13, 13),
+                BackColor = ThemeManager.Background,
                 Padding = new Padding(0, 5, 0, 0)
             };
             logPanel.Paint += (s, e) =>
             {
                 ControlPaint.DrawBorder(e.Graphics, logPanel.ClientRectangle,
-                    Color.FromArgb(60, 60, 60), 1, ButtonBorderStyle.Solid,
-                    Color.FromArgb(60, 60, 60), 1, ButtonBorderStyle.Solid,
-                    Color.FromArgb(60, 60, 60), 1, ButtonBorderStyle.Solid,
-                    Color.FromArgb(60, 60, 60), 1, ButtonBorderStyle.Solid);
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid,
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid,
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid,
+                    ThemeManager.Border, 1, ButtonBorderStyle.Solid);
             };
             logPanel.Controls.Add(logBox);
             mainLayout.Controls.Add(logPanel, 0, 4);
 
-            FlowLayoutPanel buttonPanel = new FlowLayoutPanel
+            var buttonPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.LeftToRight,
@@ -173,26 +190,26 @@ namespace BunnyBlack.Forms
 
             scanButton = new Button
             {
-                Text = "Начать сканирование",
+                Text = Loc.T("scan.start"),
                 Width = 180,
                 Height = 35,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(30, 30, 30),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                BackColor = ThemeManager.PanelAlt,
+                ForeColor = ThemeManager.Foreground,
                 Cursor = Cursors.Hand,
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                FlatAppearance = { BorderSize = 1, BorderColor = Color.FromArgb(60, 60, 60) }
+                FlatAppearance = { BorderSize = 1, BorderColor = ThemeManager.Border }
             };
             scanButton.Click += ScanButton_Click;
 
             fixButton = new Button
             {
-                Text = "Исправить всё",
+                Text = Loc.T("scan.fixall"),
                 Width = 150,
                 Height = 35,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(25, 60, 40),
-                ForeColor = Color.FromArgb(240, 240, 240),
+                BackColor = ThemeManager.SuccessBack,
+                ForeColor = ThemeManager.Success,
                 Cursor = Cursors.Hand,
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 FlatAppearance = { BorderSize = 0 },
@@ -209,13 +226,13 @@ namespace BunnyBlack.Forms
 
         private DataGridView CreateDarkGrid()
         {
-            DataGridView grid = new DataGridView
+            var grid = new DataGridView
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(13, 13, 13),
-                ForeColor = Color.FromArgb(216, 216, 216),
-                BackgroundColor = Color.FromArgb(13, 13, 13),
-                GridColor = Color.FromArgb(45, 45, 45),
+                BackColor = ThemeManager.Background,
+                ForeColor = ThemeManager.Foreground,
+                BackgroundColor = ThemeManager.Background,
+                GridColor = ThemeManager.Border,
                 BorderStyle = BorderStyle.FixedSingle,
                 RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
@@ -227,18 +244,14 @@ namespace BunnyBlack.Forms
                 ColumnHeadersHeight = 32
             };
             grid.RowTemplate.Height = 28;
-
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(25, 25, 25);
-            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(200, 200, 200);
+            grid.ColumnHeadersDefaultCellStyle.BackColor = ThemeManager.Header;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = ThemeManager.Foreground;
             grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10, FontStyle.Bold);
-
-            grid.DefaultCellStyle.BackColor = Color.FromArgb(18, 18, 18);
-            grid.DefaultCellStyle.ForeColor = Color.FromArgb(216, 216, 216);
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(40, 50, 60);
-            grid.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 255, 255);
-
-            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(14, 14, 14);
-
+            grid.DefaultCellStyle.BackColor = ThemeManager.Row;
+            grid.DefaultCellStyle.ForeColor = ThemeManager.Foreground;
+            grid.DefaultCellStyle.SelectionBackColor = ThemeManager.Selection;
+            grid.DefaultCellStyle.SelectionForeColor = ThemeManager.SelectionText;
+            grid.AlternatingRowsDefaultCellStyle.BackColor = ThemeManager.RowAlt;
             return grid;
         }
 
@@ -257,112 +270,89 @@ namespace BunnyBlack.Forms
             UpdateUI(() =>
             {
                 scanButton.Enabled = false;
-                scanButton.Text = "Сканирование...";
+                scanButton.Text = "Scanning...";
                 fixButton.Enabled = false;
                 foundThreats.Clear();
                 grid.Rows.Clear();
                 logBox.Clear();
-                if (scanProgress != null) scanProgress.Visible = true;
-                AppendLog("▶ Запуск глубокого сканирования системы...", Color.Cyan);
-                AppendLog("═══════════════════════════════════════════");
-
-                // диагностика
-                if (RegistryHelper.IsWinReEnvironment())
-                {
-                    AppendLog($"  [i] WinRE: оффлайн-кусты", Color.LightBlue);
-                    string status;
-                    RegistryHelper.LoadOfflineHives(out status);
-                    AppendLog($"  [i] {status}", Color.LightBlue);
-                }
+                scanProgress.Visible = true;
+                AppendLog("▶ Scan started", ThemeManager.Success);
             });
 
-            var batch = new List<Threat>();
-            Action flush = () =>
+            try
             {
-                if (batch.Count == 0) return;
-                var snapshot = new List<Threat>(batch);
-                batch.Clear();
-                UpdateUI(() =>
+                var batch = new List<Threat>();
+                Action flush = () =>
                 {
-                    foreach (var t in snapshot)
+                    if (batch.Count == 0) return;
+                    var snapshot = new List<Threat>(batch);
+                    batch.Clear();
+                    UpdateUI(() =>
                     {
-                        int idx = grid.Rows.Add(t.Name, t.Description, t.Risk);
-                        if (t.Risk == "Критический") grid.Rows[idx].Cells[2].Style.ForeColor = Color.Red;
-                        else if (t.Risk == "Высокий") grid.Rows[idx].Cells[2].Style.ForeColor = Color.OrangeRed;
-                    }
-                });
-            };
+                        foreach (var t in snapshot)
+                        {
+                            int idx = grid.Rows.Add(t.Name, t.Description, t.Risk);
+                            if (t.Risk == "Критический" || t.Risk == "Critical")
+                                grid.Rows[idx].Cells[2].Style.ForeColor = ThemeManager.Danger;
+                            else if (t.Risk == "Высокий" || t.Risk == "High")
+                                grid.Rows[idx].Cells[2].Style.ForeColor = ThemeManager.Warning;
+                        }
+                    });
+                };
 
-            ScanRegistryRestrictions(batch, flush);
-            ScanScancodeMap(batch, flush);
-            ScanDebuggers(batch, flush);
-            ScanDisallowRun(batch, flush);
-            ScanHostsFile(batch, flush);
-            flush();
+                ScanRegistryRestrictions(batch, flush);
+                ScanScancodeMap(batch, flush);
+                ScanDebuggers(batch, flush);
+                ScanDisallowRun(batch, flush);
+                ScanHostsFile(batch, flush);
+                ScanAppInitDlls(batch, flush);
+                ScanWinlogonHijack(batch, flush);
+                ScanServicesCritical(batch, flush);
+                ScanBootExecute(batch, flush);
+                ScanWmiSubscriptions(batch, flush);
+                flush();
+            }
+            catch (Exception ex) { BbLog.Error("[PerformScan]", ex); }
 
             UpdateUI(() =>
             {
-                AppendLog("═══════════════════════════════════════════");
-                AppendLog($"✅ Сканирование завершено. Найдено угроз: {foundThreats.Count}", Color.LightGreen);
-
-                scanButton.Text = "Начать сканирование";
+                AppendLog(Loc.T("scan.done"), ThemeManager.Success);
+                scanButton.Text = Loc.T("scan.start");
                 scanButton.Enabled = true;
                 fixButton.Enabled = foundThreats.Count > 0;
-                if (scanProgress != null) scanProgress.Visible = false;
+                scanProgress.Visible = false;
                 isScanning = false;
                 isScanCompleted = true;
             });
         }
 
-        // ============================================================
-        // ФИКС — проверка политик: теперь работает и в WinRE,
-        // через оффлайн-кусты. Каждая политика проверяется во всех
-        // возможных местах: HKLM Policy + HKCU Policy + оффлайн HKCU.
-        // ============================================================
+        // ===== Проверки =====
         private void ScanRegistryRestrictions(List<Threat> batch, Action flush)
         {
-            // (name, desc, risk, hive, path, val, expected)
             var checks = new (string name, string desc, string risk, string hive, string path, string val, object expected)[]
             {
-                // ============================================================
-                // User-policy — HKCU\...\Policies
-                // ============================================================
-                ("DisableTaskMgr", "Блокировка диспетчера задач", "Высокий", "HKCU",
+                ("DisableTaskMgr", "Block Task Manager", "High", "HKCU",
                     @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableTaskMgr", 1),
-                ("DisableRegistryTools", "Блокировка редактора реестра", "Высокий", "HKCU",
+                ("DisableRegistryTools", "Block regedit", "High", "HKCU",
                     @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableRegistryTools", 1),
-                ("DisableCMD", "Блокировка командной строки (CMD)", "Высокий", "HKCU",
+                ("DisableCMD", "Block CMD", "High", "HKCU",
                     @"Software\Policies\Microsoft\Windows\System", "DisableCMD", 2),
-                ("NoControlPanel", "Скрытие Панели управления", "Средний", "HKCU",
+                ("NoControlPanel", "Hide Control Panel", "Medium", "HKCU",
                     @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoControlPanel", 1),
-                ("NoRun", "Блокировка меню 'Выполнить'", "Средний", "HKCU",
+                ("NoRun", "Block Run dialog", "Medium", "HKCU",
                     @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoRun", 1),
-                ("NoWinKeys", "Отключение горячих клавиш Win", "Средний", "HKCU",
+                ("NoWinKeys", "Disable Win hotkeys", "Medium", "HKCU",
                     @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoWinKeys", 1),
-                ("DisableLockWorkstation", "Блокировка блокировки ПК (Win+L)", "Средний", "HKCU",
+                ("DisableLockWorkstation", "Block Win+L", "Medium", "HKCU",
                     @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableLockWorkstation", 1),
-                ("DisableChangePassword", "Блокировка смены пароля", "Средний", "HKCU",
+                ("DisableChangePassword", "Block password change", "Medium", "HKCU",
                     @"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableChangePassword", 1),
-
-                // ============================================================
-                // Machine-wide policy — HKLM
-                // ============================================================
-                ("HKLM:DisableTaskMgr", "Блокировка диспетчера задач (HKLM)", "Высокий", "HKLM",
+                ("HKLM:DisableTaskMgr", "Task Mgr (HKLM)", "High", "HKLM",
                     @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableTaskMgr", 1),
-                ("HKLM:DisableRegistryTools", "Блокировка редактора реестра (HKLM)", "Высокий", "HKLM",
+                ("HKLM:DisableRegistryTools", "Regedit (HKLM)", "High", "HKLM",
                     @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableRegistryTools", 1),
-                ("HKLM:DisableCMD", "Блокировка CMD (HKLM)", "Высокий", "HKLM",
+                ("HKLM:DisableCMD", "CMD (HKLM)", "High", "HKLM",
                     @"SOFTWARE\Policies\Microsoft\Windows\System", "DisableCMD", 2),
-                ("HKLM:NoControlPanel", "Скрытие Панели управления (HKLM)", "Средний", "HKLM",
-                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoControlPanel", 1),
-                ("HKLM:NoRun", "Блокировка 'Выполнить' (HKLM)", "Средний", "HKLM",
-                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoRun", 1),
-                ("HKLM:NoViewOnDrive", "Ограничение доступа к дискам (HKLM)", "Средний", "HKLM",
-                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoViewOnDrive", null),
-                ("HKLM:DisableLockWorkstation", "Блокировка Win+L (HKLM)", "Средний", "HKLM",
-                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableLockWorkstation", 1),
-                ("HKLM:DisableChangePassword", "Блокировка смены пароля (HKLM)", "Средний", "HKLM",
-                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "DisableChangePassword", 1),
             };
 
             foreach (var check in checks)
@@ -383,12 +373,9 @@ namespace BunnyBlack.Forms
                     foundThreats.Add(t);
                     batch.Add(t);
                     if (batch.Count >= 20) flush();
-                    UpdateUI(() => AppendLog($"  [!] Обнаружено: {check.name} ({check.risk})", Color.OrangeRed));
+                    UpdateUI(() => AppendLog($"  [!] {check.name}", ThemeManager.Warning));
                 }
-                else
-                {
-                    UpdateUI(() => AppendLog($"  [✓] Безопасно: {check.name}", Color.Gray));
-                }
+                else UpdateUI(() => AppendLog($"  [✓] {check.name}", ThemeManager.Muted));
             }
         }
 
@@ -401,8 +388,8 @@ namespace BunnyBlack.Forms
                 var t = new Threat
                 {
                     Name = "ScancodeMap",
-                    Description = "Переназначение или блокировка клавиш клавиатуры",
-                    Risk = "Критический",
+                    Description = "Keyboard remap",
+                    Risk = "Critical",
                     Hive = "HKLM",
                     Path = path,
                     ValueName = "ScancodeMap",
@@ -411,12 +398,9 @@ namespace BunnyBlack.Forms
                 foundThreats.Add(t);
                 batch.Add(t);
                 if (batch.Count >= 20) flush();
-                UpdateUI(() => AppendLog("  [!] Обнаружено: ScancodeMap (Критический)", Color.Red));
+                UpdateUI(() => AppendLog("  [!] ScancodeMap", ThemeManager.Danger));
             }
-            else
-            {
-                UpdateUI(() => AppendLog("  [✓] Безопасно: ScancodeMap", Color.Gray));
-            }
+            else UpdateUI(() => AppendLog("  [✓] ScancodeMap", ThemeManager.Muted));
         }
 
         private void ScanDebuggers(List<Threat> batch, Action flush)
@@ -426,44 +410,36 @@ namespace BunnyBlack.Forms
             {
                 using (var key = OpenHiveKey("HKLM", basePath))
                 {
-                    if (key == null)
-                    {
-                        UpdateUI(() => AppendLog("  [!] Debuggers: ключ не открылся", Color.Orange));
-                        return;
-                    }
-
-                    int foundCount = 0;
+                    if (key == null) return;
+                    int found = 0;
                     foreach (string subName in key.GetSubKeyNames())
                     {
                         using (var subKey = key.OpenSubKey(subName))
                         {
                             if (subKey != null && subKey.GetValue("Debugger") != null)
                             {
-                                foundCount++;
-                                string capturedName = subName;
+                                found++;
                                 var t = new Threat
                                 {
-                                    Name = $"Debugger: {capturedName}",
-                                    Description = "Подмена запуска через отладчик",
-                                    Risk = "Критический",
+                                    Name = $"Debugger: {subName}",
+                                    Description = "IFEO hijack",
+                                    Risk = "Critical",
                                     Hive = "HKLM",
-                                    Path = basePath + "\\" + capturedName,
+                                    Path = basePath + "\\" + subName,
                                     ValueName = "Debugger",
                                     RepairMethod = "DeleteValue"
                                 };
                                 foundThreats.Add(t);
                                 batch.Add(t);
                                 if (batch.Count >= 20) flush();
-                                UpdateUI(() => AppendLog($"  [!] Обнаружено: Debugger в '{capturedName}' (Критический)", Color.Red));
+                                UpdateUI(() => AppendLog($"  [!] Debugger {subName}", ThemeManager.Danger));
                             }
                         }
                     }
-
-                    if (foundCount == 0)
-                        UpdateUI(() => AppendLog("  [✓] Безопасно: Debuggers", Color.Gray));
+                    if (found == 0) UpdateUI(() => AppendLog("  [✓] IFEO", ThemeManager.Muted));
                 }
             }
-            catch (Exception ex) { UpdateUI(() => AppendLog($"  [!] Ошибка Debuggers: {ex.Message}", Color.Red)); }
+            catch { }
         }
 
         private void ScanDisallowRun(List<Threat> batch, Action flush)
@@ -475,8 +451,8 @@ namespace BunnyBlack.Forms
                 var t = new Threat
                 {
                     Name = "DisallowRun",
-                    Description = "Чёрный список запрещённых к запуску программ",
-                    Risk = "Высокий",
+                    Description = "Block list",
+                    Risk = "High",
                     Hive = "HKCU",
                     Path = path,
                     ValueName = "DisallowRun",
@@ -485,12 +461,9 @@ namespace BunnyBlack.Forms
                 foundThreats.Add(t);
                 batch.Add(t);
                 if (batch.Count >= 20) flush();
-                UpdateUI(() => AppendLog("  [!] Обнаружено: DisallowRun (Высокий)", Color.OrangeRed));
+                UpdateUI(() => AppendLog("  [!] DisallowRun", ThemeManager.Warning));
             }
-            else
-            {
-                UpdateUI(() => AppendLog("  [✓] Безопасно: DisallowRun", Color.Gray));
-            }
+            else UpdateUI(() => AppendLog("  [✓] DisallowRun", ThemeManager.Muted));
         }
 
         private void ScanHostsFile(List<Threat> batch, Action flush)
@@ -501,161 +474,292 @@ namespace BunnyBlack.Forms
             {
                 if (!File.Exists(hostsPath))
                 {
-                    UpdateUI(() => AppendLog($"  [✓] Hosts не найден ({hostsPath})", Color.Gray));
+                    UpdateUI(() => AppendLog("  [✓] hosts", ThemeManager.Muted));
                     return;
                 }
 
-                string[] lines = File.ReadAllLines(hostsPath, Encoding.UTF8);
-                List<string> suspiciousEntries = new List<string>();
+                var lines = File.ReadAllLines(hostsPath, Encoding.UTF8);
+                var suspicious = new List<string>();
+                string[] domains = { "google.com", "youtube.com", "facebook.com", "vk.com", "ok.ru", "mail.ru", "yandex.ru", "github.com" };
 
-                string[] protectedDomains = { "google.com", "youtube.com", "facebook.com", "vk.com", "ok.ru", "mail.ru", "yandex.ru", "github.com" };
-
-                foreach (string line in lines)
+                foreach (var line in lines)
                 {
-                    string trimmed = line.Trim();
-                    if (trimmed.StartsWith("#") || string.IsNullOrEmpty(trimmed)) continue;
-
-                    if (trimmed.StartsWith("127.0.0.1") || trimmed.StartsWith("0.0.0.0"))
-                        foreach (string domain in protectedDomains)
-                            if (trimmed.Contains(domain))
-                                suspiciousEntries.Add(trimmed);
+                    string t = line.Trim();
+                    if (t.StartsWith("#") || string.IsNullOrEmpty(t)) continue;
+                    if (t.StartsWith("127.0.0.1") || t.StartsWith("0.0.0.0"))
+                        foreach (var d in domains)
+                            if (t.Contains(d)) suspicious.Add(t);
                 }
 
-                if (suspiciousEntries.Count > 0)
+                if (suspicious.Count > 0)
                 {
                     var t = new Threat
                     {
                         Name = "HostsFile",
-                        Description = $"Фишинговые перенаправления: {string.Join("; ", suspiciousEntries)}",
-                        Risk = "Критический",
+                        Description = $"Phishing: {string.Join("; ", suspicious)}",
+                        Risk = "Critical",
                         RepairMethod = "FixHosts"
                     };
                     foundThreats.Add(t);
                     batch.Add(t);
                     if (batch.Count >= 20) flush();
-                    UpdateUI(() =>
-                    {
-                        AppendLog("  [!] Обнаружено: Фишинг в hosts (Критический)", Color.Red);
-                        foreach (var entry in suspiciousEntries) AppendLog($"    → {entry}", Color.Red);
-                    });
+                    UpdateUI(() => AppendLog("  [!] hosts phishing", ThemeManager.Danger));
                 }
-                else
-                {
-                    UpdateUI(() => AppendLog("  [✓] Безопасно: HostsFile", Color.Gray));
-                }
+                else UpdateUI(() => AppendLog("  [✓] HostsFile", ThemeManager.Muted));
             }
-            catch (Exception ex)
-            {
-                UpdateUI(() => AppendLog($"  [!] Ошибка чтения hosts: {ex.Message}", Color.Red));
-            }
+            catch { }
         }
 
-        // ============================================================
-        // ИСПРАВЛЕНИЕ
-        // ============================================================
+        private void ScanAppInitDlls(List<Threat> batch, Action flush)
+        {
+            const string path = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows";
+            try
+            {
+                using (var key = OpenHiveKey("HKLM", path))
+                {
+                    if (key == null) { UpdateUI(() => AppendLog("  [✓] AppInit", ThemeManager.Muted)); return; }
+
+                    string dlls = key.GetValue("AppInit_DLLs")?.ToString() ?? "";
+                    int load = 0;
+                    try { load = Convert.ToInt32(key.GetValue("LoadAppInit_DLLs") ?? 0); } catch { }
+
+                    if (load != 0 && !string.IsNullOrWhiteSpace(dlls))
+                    {
+                        var t = new Threat
+                        {
+                            Name = "AppInit_DLLs",
+                            Description = $"Inject: {dlls}",
+                            Risk = "Critical",
+                            Hive = "HKLM",
+                            Path = path,
+                            ValueName = "AppInit_DLLs",
+                            RepairMethod = "DisableAppInit"
+                        };
+                        foundThreats.Add(t);
+                        batch.Add(t);
+                        if (batch.Count >= 20) flush();
+                        UpdateUI(() => AppendLog($"  [!] AppInit_DLLs: {dlls}", ThemeManager.Danger));
+                    }
+                    else UpdateUI(() => AppendLog("  [✓] AppInit_DLLs", ThemeManager.Muted));
+                }
+            }
+            catch { }
+        }
+
+        private void ScanWinlogonHijack(List<Threat> batch, Action flush)
+        {
+            const string path = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
+            try
+            {
+                using (var key = OpenHiveKey("HKLM", path))
+                {
+                    if (key == null) { UpdateUI(() => AppendLog("  [✓] Winlogon", ThemeManager.Muted)); return; }
+
+                    string shell = key.GetValue("Shell")?.ToString() ?? "explorer.exe";
+                    string userinit = key.GetValue("Userinit")?.ToString() ?? "";
+
+                    bool shellNormal = shell.Trim().Equals("explorer.exe", StringComparison.OrdinalIgnoreCase);
+                    bool userinitNormal = string.IsNullOrEmpty(userinit) ||
+                        userinit.ToLowerInvariant().Contains(@"c:\windows\system32\userinit.exe") ||
+                        userinit.ToLowerInvariant().Contains(@"%systemroot%\system32\userinit.exe");
+
+                    if (!shellNormal)
+                    {
+                        var t = new Threat { Name = "Winlogon:Shell", Description = $"Shell: {shell}", Risk = "Critical", Hive = "HKLM", Path = path, ValueName = "Shell", RepairMethod = "RestoreWinlogonShell" };
+                        foundThreats.Add(t); batch.Add(t); if (batch.Count >= 20) flush();
+                        UpdateUI(() => AppendLog($"  [!] Shell: {shell}", ThemeManager.Danger));
+                    }
+                    else UpdateUI(() => AppendLog("  [✓] Winlogon Shell", ThemeManager.Muted));
+
+                    if (!userinitNormal)
+                    {
+                        var t = new Threat { Name = "Winlogon:Userinit", Description = $"Userinit: {userinit}", Risk = "Critical", Hive = "HKLM", Path = path, ValueName = "Userinit", RepairMethod = "RestoreWinlogonUserinit" };
+                        foundThreats.Add(t); batch.Add(t); if (batch.Count >= 20) flush();
+                        UpdateUI(() => AppendLog($"  [!] Userinit: {userinit}", ThemeManager.Danger));
+                    }
+                    else UpdateUI(() => AppendLog("  [✓] Winlogon Userinit", ThemeManager.Muted));
+                }
+            }
+            catch { }
+        }
+
+        private void ScanServicesCritical(List<Threat> batch, Action flush)
+        {
+            const string path = @"SYSTEM\CurrentControlSet\Services";
+            try
+            {
+                using (var key = OpenHiveKey("HKLM", path))
+                {
+                    if (key == null) return;
+                    int found = 0;
+
+                    foreach (var svc in key.GetSubKeyNames())
+                    {
+                        using (var sub = key.OpenSubKey(svc))
+                        {
+                            if (sub == null) continue;
+                            int start = -1;
+                            try { start = Convert.ToInt32(sub.GetValue("Start") ?? -1); } catch { }
+                            if (start != 0 && start != 1) continue;
+
+                            string image = sub.GetValue("ImagePath")?.ToString() ?? "";
+                            if (string.IsNullOrWhiteSpace(image)) continue;
+
+                            string lower = image.ToLowerInvariant();
+                            bool sus =
+                                (lower.Contains(@"\temp\") || lower.Contains(@"\appdata\") ||
+                                 lower.Contains(@"\users\public\") || lower.Contains(@"\programdata\")) &&
+                                !lower.Contains(@"\windows\");
+
+                            if (sus)
+                            {
+                                found++;
+                                var t = new Threat { Name = $"Service: {svc}", Description = $"Start={start} → {image}", Risk = start == 0 ? "Critical" : "High", Hive = "HKLM", Path = path + "\\" + svc, ValueName = "ImagePath", RepairMethod = "DeleteValue" };
+                                foundThreats.Add(t); batch.Add(t); if (batch.Count >= 20) flush();
+                                UpdateUI(() => AppendLog($"  [!] Service {svc}", ThemeManager.Danger));
+                            }
+                        }
+                    }
+                    if (found == 0) UpdateUI(() => AppendLog("  [✓] Services", ThemeManager.Muted));
+                }
+            }
+            catch { }
+        }
+
+        private void ScanBootExecute(List<Threat> batch, Action flush)
+        {
+            const string path = @"SYSTEM\CurrentControlSet\Control\Session Manager";
+            try
+            {
+                using (var key = OpenHiveKey("HKLM", path))
+                {
+                    if (key == null) return;
+                    object val = key.GetValue("BootExecute");
+                    string[] arr = val as string[] ?? (val is string s ? new[] { s } : null);
+                    if (arr == null || arr.Length == 0)
+                    {
+                        UpdateUI(() => AppendLog("  [✓] BootExecute", ThemeManager.Muted));
+                        return;
+                    }
+
+                    bool bad = false;
+                    foreach (var entry in arr)
+                    {
+                        string norm = (entry ?? "").Trim().ToLowerInvariant();
+                        bool ok = norm == "autocheck autochk *" || norm.StartsWith("autocheck autochk");
+                        if (!ok) bad = true;
+                    }
+
+                    if (bad)
+                    {
+                        var t = new Threat { Name = "BootExecute", Description = string.Join(" | ", arr), Risk = "Critical", Hive = "HKLM", Path = path, ValueName = "BootExecute", RepairMethod = "ReportOnly" };
+                        foundThreats.Add(t); batch.Add(t); if (batch.Count >= 20) flush();
+                        UpdateUI(() => AppendLog("  [!] BootExecute", ThemeManager.Danger));
+                    }
+                    else UpdateUI(() => AppendLog("  [✓] BootExecute", ThemeManager.Muted));
+                }
+            }
+            catch { }
+        }
+
+        private void ScanWmiSubscriptions(List<Threat> batch, Action flush)
+        {
+            try
+            {
+                var subs = WmiSubscriptionScanner.Scan();
+                if (subs == null || subs.Count == 0)
+                {
+                    UpdateUI(() => AppendLog("  [✓] WMI", ThemeManager.Muted));
+                    return;
+                }
+
+                int found = 0;
+                foreach (var ws in subs)
+                {
+                    if (!ws.Suspicious) continue;
+                    found++;
+                    var t = new Threat { Name = "WMI Subscription", Description = $"{ws.BindingName}: {ws.SuspicionReason}", Risk = "Critical", RepairMethod = "ReportOnly" };
+                    foundThreats.Add(t); batch.Add(t); if (batch.Count >= 20) flush();
+                    UpdateUI(() => AppendLog($"  [!] WMI: {ws.BindingName}", ThemeManager.Danger));
+                }
+                if (found == 0) UpdateUI(() => AppendLog("  [✓] WMI Subscriptions", ThemeManager.Muted));
+            }
+            catch { }
+        }
+
         private void FixButton_Click(object sender, EventArgs e)
         {
             if (foundThreats.Count == 0) return;
 
-            if (MessageBox.Show($"Вы уверены, что хотите исправить {foundThreats.Count} угроз?\nЭто действие необратимо.",
-                "Подтверждение исправления", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.No) return;
+            if (MessageBox.Show($"Fix {foundThreats.Count}?", Loc.T("warn.confirm"),
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.No) return;
 
             int fixedCount = 0;
-
             foreach (var threat in foundThreats)
             {
                 if (threat.RepairMethod == "DeleteValue")
                 {
-                    if (DeleteRegistryValue(threat.Hive, threat.Path, threat.ValueName))
-                    {
-                        fixedCount++;
-                        UpdateUI(() => AppendLog($"  [+] Исправлено: {threat.Name}", Color.LightGreen));
-                    }
-                    else
-                    {
-                        UpdateUI(() => AppendLog($"  [-] Ошибка исправления: {threat.Name}", Color.Red));
-                    }
+                    if (DeleteRegistryValue(threat.Hive, threat.Path, threat.ValueName)) fixedCount++;
                 }
                 else if (threat.RepairMethod == "FixHosts")
                 {
-                    if (FixHostsFile())
-                    {
-                        fixedCount++;
-                        UpdateUI(() => AppendLog("  [+] Исправлено: HostsFile", Color.LightGreen));
-                    }
-                    else
-                    {
-                        UpdateUI(() => AppendLog("  [-] Ошибка исправления: HostsFile", Color.Red));
-                    }
+                    if (FixHostsFile()) fixedCount++;
+                }
+                else if (threat.RepairMethod == "DisableAppInit")
+                {
+                    if (DisableAppInit()) fixedCount++;
+                }
+                else if (threat.RepairMethod == "RestoreWinlogonShell")
+                {
+                    if (RestoreWinlogonValue("Shell", "explorer.exe")) fixedCount++;
+                }
+                else if (threat.RepairMethod == "RestoreWinlogonUserinit")
+                {
+                    if (RestoreWinlogonValue("Userinit", @"C:\Windows\system32\userinit.exe,")) fixedCount++;
                 }
             }
 
             UpdateUI(() =>
             {
-                AppendLog($"\n✅ Исправление завершено. Исправлено: {fixedCount} из {foundThreats.Count}", Color.LightGreen);
+                AppendLog($"Fixed: {fixedCount}/{foundThreats.Count}", ThemeManager.Success);
                 foundThreats.Clear();
                 grid.Rows.Clear();
                 fixButton.Enabled = false;
             });
         }
 
-        // ============================================================
-        // ФИКС: OpenHiveKey — явно работает с оффлайн-кустами
-        // HKLM → BunnyBlack_Offline_SOFTWARE (или _SYSTEM)
-        // HKCU → BunnyBlack_Offline_HKCU, fallback на SOFTWARE
-        // ============================================================
         private RegistryKey OpenHiveKey(string hive, string path, bool writable = false)
         {
             try
             {
                 if (!RegistryHelper.IsWinReEnvironment())
                 {
-                    RegistryKey baseKey = hive == "HKLM" ? Registry.LocalMachine : Registry.CurrentUser;
+                    var baseKey = hive == "HKLM" ? Registry.LocalMachine : Registry.CurrentUser;
                     return baseKey.OpenSubKey(path, writable);
                 }
-
-                // WinRE — грузим кусты
-                RegistryHelper.LoadOfflineHives();
-
-                string fullPath;
 
                 if (hive == "HKLM")
                 {
                     if (path.StartsWith("SYSTEM\\", StringComparison.OrdinalIgnoreCase))
-                        fullPath = "BunnyBlack_Offline_SYSTEM\\" + path.Substring(7);
-                    else if (path.StartsWith("SOFTWARE\\", StringComparison.OrdinalIgnoreCase))
-                        fullPath = "BunnyBlack_Offline_SOFTWARE\\" + path.Substring(9);
-                    else
-                        fullPath = "BunnyBlack_Offline_SOFTWARE\\" + path;
-                }
-                else // HKCU
-                {
-                    // Сначала пробуем оффлайн-HKCU
-                    string hkcu = "BunnyBlack_Offline_HKCU\\" + path;
-                    var test = Registry.LocalMachine.OpenSubKey(hkcu, writable);
-                    if (test != null) return test;
-
-                    // Fallback: machine-wide policy из SOFTWARE
-                    string sw = "BunnyBlack_Offline_SOFTWARE\\" + path;
-                    var test2 = Registry.LocalMachine.OpenSubKey(sw, writable);
-                    if (test2 != null) return test2;
-
-                    return null;
+                    {
+                        RegistryHelper.LoadOfflineHives();
+                        return Registry.LocalMachine.OpenSubKey("BB_Offline_SYSTEM\\" + path.Substring(7), writable);
+                    }
+                    if (path.StartsWith("SOFTWARE\\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RegistryHelper.LoadOfflineHives();
+                        return Registry.LocalMachine.OpenSubKey("BB_Offline_SOFTWARE\\" + path.Substring(9), writable);
+                    }
+                    return Registry.LocalMachine.OpenSubKey(path, writable);
                 }
 
-                Debug.WriteLine($"[OpenHiveKey] {hive}\\{path} → {fullPath}");
-                var key = Registry.LocalMachine.OpenSubKey(fullPath, writable);
-                if (key == null) Debug.WriteLine($"[OpenHiveKey] NULL for {fullPath}");
-                return key;
+                RegistryHelper.LoadHkcu();
+                return Registry.Users.OpenSubKey("BB_Offline_HKCU\\" + path, writable);
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[OpenHiveKey] {ex.Message}");
-                return null;
-            }
+            catch (Exception ex) { BbLog.Error("[OpenHiveKey]", ex); return null; }
         }
 
-        private bool CheckRegistryValue(string hive, string path, string valueName, object expectedValue)
+        private bool CheckRegistryValue(string hive, string path, string valueName, object expected)
         {
             try
             {
@@ -664,10 +768,8 @@ namespace BunnyBlack.Forms
                     if (key == null) return false;
                     object val = key.GetValue(valueName);
                     if (val == null) return false;
-
-                    if (expectedValue == null) return true;
-                    if (val is int iVal && expectedValue is int iExp) return iVal == iExp;
-                    if (val is string sVal && expectedValue is string sExp) return sVal == sExp;
+                    if (expected == null) return true;
+                    if (val is int iVal && expected is int iExp) return iVal == iExp;
                     return false;
                 }
             }
@@ -688,11 +790,36 @@ namespace BunnyBlack.Forms
                 }
                 return false;
             }
-            catch (Exception ex)
+            catch { return false; }
+        }
+
+        private bool DisableAppInit()
+        {
+            try
             {
-                Debug.WriteLine($"[DeleteRegistryValue] {ex.Message}");
-                return false;
+                using (var key = OpenHiveKey("HKLM", @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows", true))
+                {
+                    if (key == null) return false;
+                    key.SetValue("AppInit_DLLs", "");
+                    key.SetValue("LoadAppInit_DLLs", 0, RegistryValueKind.DWord);
+                    return true;
+                }
             }
+            catch { return false; }
+        }
+
+        private bool RestoreWinlogonValue(string name, string value)
+        {
+            try
+            {
+                using (var key = OpenHiveKey("HKLM", @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", true))
+                {
+                    if (key == null) return false;
+                    key.SetValue(name, value);
+                    return true;
+                }
+            }
+            catch { return false; }
         }
 
         private bool FixHostsFile()
@@ -703,29 +830,22 @@ namespace BunnyBlack.Forms
                 string hostsPath = Path.Combine(sysDrive, @"Windows\System32\drivers\etc\hosts");
                 if (!File.Exists(hostsPath)) return false;
 
-                string[] lines = File.ReadAllLines(hostsPath, Encoding.UTF8);
-                List<string> cleanLines = new List<string>();
+                var lines = File.ReadAllLines(hostsPath, Encoding.UTF8);
+                var clean = new List<string>();
+                string[] domains = { "google.com", "youtube.com", "facebook.com", "vk.com", "ok.ru", "mail.ru", "yandex.ru", "github.com" };
 
-                string[] protectedDomains = { "google.com", "youtube.com", "facebook.com", "vk.com", "ok.ru", "mail.ru", "yandex.ru", "github.com" };
-
-                foreach (string line in lines)
+                foreach (var line in lines)
                 {
-                    string trimmed = line.Trim();
-                    if (trimmed.StartsWith("#") || string.IsNullOrEmpty(trimmed))
-                    {
-                        cleanLines.Add(line);
-                        continue;
-                    }
-
-                    bool malicious = false;
-                    if (trimmed.StartsWith("127.0.0.1") || trimmed.StartsWith("0.0.0.0"))
-                        foreach (string domain in protectedDomains)
-                            if (trimmed.Contains(domain)) { malicious = true; break; }
-
-                    if (!malicious) cleanLines.Add(line);
+                    string t = line.Trim();
+                    if (t.StartsWith("#") || string.IsNullOrEmpty(t)) { clean.Add(line); continue; }
+                    bool bad = false;
+                    if (t.StartsWith("127.0.0.1") || t.StartsWith("0.0.0.0"))
+                        foreach (var d in domains)
+                            if (t.Contains(d)) { bad = true; break; }
+                    if (!bad) clean.Add(line);
                 }
 
-                File.WriteAllLines(hostsPath, cleanLines, Encoding.UTF8);
+                File.WriteAllLines(hostsPath, clean, Encoding.UTF8);
                 return true;
             }
             catch { return false; }
@@ -744,12 +864,21 @@ namespace BunnyBlack.Forms
                 logBox.Invoke(new Action(() => AppendLog(text, color)));
                 return;
             }
-
             logBox.SelectionStart = logBox.TextLength;
             logBox.SelectionLength = 0;
-            logBox.SelectionColor = color ?? Color.FromArgb(200, 200, 200);
+            logBox.SelectionColor = color ?? ThemeManager.Foreground;
             logBox.AppendText(text + Environment.NewLine);
             logBox.ScrollToCaret();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                ThemeManager.ThemeChanged -= ApplyTheme;
+                Loc.LanguageChanged -= ApplyLanguage;
+            }
+            base.Dispose(disposing);
         }
     }
 }

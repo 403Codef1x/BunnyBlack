@@ -1,27 +1,31 @@
 // language: C#, file: Program.cs
-// Полная замена.
-// п.1  — WinRE-детект расширен: MiniNT + windir X:\ + SystemRoot X:\
-// п.18 — обёртка Application.Run в try/catch, крэш-лог в %TEMP%\bunny_crash.log
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Principal;
 using System.Windows.Forms;
+using BunnyBlack.Core;
 
 namespace BunnyBlack
 {
     internal static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            try { System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance); }
+            catch { }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            // Глобальный перехватчик — чтобы не тихо умирало
             Application.ThreadException += (s, e) => LogCrash(e.Exception, "ThreadException");
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
                 LogCrash(e.ExceptionObject as Exception, "UnhandledException");
+
+            // Загрузить тему и язык ДО создания окна
+            ThemeManager.Load();
+            Loc.Load();
 
             if (!IsAdministrator())
             {
@@ -29,17 +33,7 @@ namespace BunnyBlack
                 return;
             }
 
-            // ============================================================
-            // ОТПРАВКА ЛОГА В DISCORD
-            // ============================================================
-            try
-            {
-                BunnyBlack.Core.DiscordLogger.SendStartupLog();
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[DiscordLogger] {ex.Message}");
-            }
+            try { BunnyBlack.Core.DiscordLogger.SendStartupLog(); } catch { }
 
             string randomWindowTitle = GenerateRandomString(8);
             bool isWinRE = IsWinREEnvironment();
@@ -51,45 +45,37 @@ namespace BunnyBlack
             catch (Exception ex)
             {
                 LogCrash(ex, "MainForm.Run");
-                MessageBox.Show(
-                    $"Критическая ошибка при запуске:\n{ex.Message}\n\nЛог: %TEMP%\\bunny_crash.log",
-                    "BunnyBlack", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Критическая ошибка:\n{ex.Message}", "BunnyBlack",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        // ============================================================
-        // п.18 — крэш-лог
-        // ============================================================
         private static void LogCrash(Exception ex, string source)
         {
             try
             {
                 string path = Path.Combine(Path.GetTempPath(), "bunny_crash.log");
-                string text = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{source}]{Environment.NewLine}" +
-                              $"{ex?.ToString() ?? "(null exception)"}{Environment.NewLine}" +
-                              new string('-', 60) + Environment.NewLine;
-                File.AppendAllText(path, text);
+                File.AppendAllText(path,
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{source}]\n{ex}\n{new string('-', 60)}\n");
             }
             catch { }
         }
 
-        private static string GenerateRandomString(int length)
+        private static string GenerateRandomString(int len)
         {
             const string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-            var random = new Random();
-            char[] stringChars = new char[length];
-            for (int i = 0; i < stringChars.Length; i++)
-                stringChars[i] = chars[random.Next(chars.Length)];
-            return new string(stringChars);
+            var r = new Random();
+            var b = new char[len];
+            for (int i = 0; i < len; i++) b[i] = chars[r.Next(chars.Length)];
+            return new string(b);
         }
 
         private static bool IsAdministrator()
         {
             try
             {
-                WindowsIdentity identity = WindowsIdentity.GetCurrent();
-                WindowsPrincipal principal = new WindowsPrincipal(identity);
-                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+                var id = WindowsIdentity.GetCurrent();
+                return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
             }
             catch { return false; }
         }
@@ -98,62 +84,37 @@ namespace BunnyBlack
         {
             try
             {
-                ProcessStartInfo startInfo = new ProcessStartInfo
+                Process.Start(new ProcessStartInfo
                 {
                     FileName = Application.ExecutablePath,
                     UseShellExecute = true,
                     Verb = "runas"
-                };
-                Process.Start(startInfo);
+                });
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Не удалось запустить программу с правами администратора:\n{ex.Message}",
+                MessageBox.Show($"Не удалось запустить от админа:\n{ex.Message}",
                     "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        // ============================================================
-        // п.1 — расширенный WinRE-детект
-        // ============================================================
         private static bool IsWinREEnvironment()
         {
-            // 1. MiniNT-ключ
             try
             {
                 using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
                     @"SYSTEM\CurrentControlSet\Control\MiniNT"))
-                {
                     if (key != null) return true;
-                }
-            }
-            catch { }
 
-            // 2. windir == X:\
-            try
-            {
                 string windir = Environment.GetEnvironmentVariable("windir") ?? "";
                 if (windir.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase)) return true;
-            }
-            catch { }
 
-            // 3. SystemRoot == X:\
-            try
-            {
-                string systemRoot = Environment.GetEnvironmentVariable("SystemRoot") ?? "";
-                if (systemRoot.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase)) return true;
-            }
-            catch { }
+                string sr = Environment.GetEnvironmentVariable("SystemRoot") ?? "";
+                if (sr.StartsWith(@"X:\", StringComparison.OrdinalIgnoreCase)) return true;
 
-            // 4. Специфичные WinRE-процессы
-            try
-            {
-                string peImg = Environment.GetEnvironmentVariable("PE_IMAGE") ?? "";
-                if (!string.IsNullOrEmpty(peImg)) return true;
+                return false;
             }
-            catch { }
-
-            return false;
+            catch { return false; }
         }
     }
 }

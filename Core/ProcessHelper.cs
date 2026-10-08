@@ -1,10 +1,6 @@
 ﻿// language: C#, file: Core/ProcessHelper.cs
-// Полная замена.
-// ФИКС КРАША: RtlSetProcessIsCritical для ЧУЖИХ процессов крашит систему
-// (KeBugCheckEx CRITICAL_PROCESS_DIED) — это поведение ядра Windows 8.1+.
-// Теперь:
-//   - Текущему процессу — флаг ставится напрямую, безопасно.
-//   - Чужому — возвращается ProtectedProcess с понятным сообщением, БЕЗ инъекции.
+// ФИКС: ProcessBreakOnTermination принимает ULONG (4 байта), а не ULONG_PTR.
+// На x64 передаём sizeof(int) = 4. Это устраняет STATUS_INFO_LENGTH_MISMATCH.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -23,7 +19,6 @@ namespace BunnyBlack.Core
         NtSetInfoFailed = 5,
         RtlSetCriticalFailed = 6,
         ProtectedProcess = 7,
-        NotCurrentProcess = 8,   // <-- новый код: операция недопустима для чужого процесса
         UnknownError = 99
     }
 
@@ -41,39 +36,45 @@ namespace BunnyBlack.Core
 
     public static class ProcessHelper
     {
+        // ============================================================
+        // P/INVOKE
+        // ============================================================
         [DllImport("ntdll.dll", SetLastError = true)]
-        private static extern int NtSuspendProcess(IntPtr processHandle);
-
+        private static extern int NtSuspendProcess(IntPtr h);
         [DllImport("ntdll.dll", SetLastError = true)]
-        private static extern int NtResumeProcess(IntPtr processHandle);
+        private static extern int NtResumeProcess(IntPtr h);
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr OpenProcess(uint processAccess, bool bInheritHandle, int processId);
-
+        private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr hObject);
-
+        private static extern bool CloseHandle(IntPtr h);
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+        private static extern bool TerminateProcess(IntPtr h, uint code);
+
+        // ============================================================
+        // NtSetInformationProcess — ФИКС: ref int (4 байта), а не ref IntPtr
+        // ============================================================
+        [DllImport("ntdll.dll", SetLastError = true)]
+        private static extern int NtSetInformationProcess(
+            IntPtr processHandle,
+            int processInformationClass,
+            ref int processInformation,
+            int processInformationLength);
+
+        [DllImport("ntdll.dll")]
+        private static extern int RtlSetProcessIsCritical(int value, int old, int flags);
+        [DllImport("ntdll.dll")]
+        private static extern int RtlGetProcessIsCritical(int pid, out int isCritical);
 
         [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
-
+        private static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, out long lpLuid);
-
+        private static extern bool LookupPrivilegeValue(string sys, string name, out long luid);
         [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges,
-            ref TOKEN_PRIVILEGES NewState, int BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
-
+        private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll,
+            ref TOKEN_PRIVILEGES state, int len, IntPtr prev, IntPtr ret);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GetCurrentProcess();
-
-        [DllImport("ntdll.dll")]
-        private static extern int RtlSetProcessIsCritical(int NewValue, int OldValue, int Flags);
-
-        [DllImport("ntdll.dll")]
-        private static extern int RtlGetProcessIsCritical(int pid, out int IsCritical);
 
         private struct TOKEN_PRIVILEGES
         {
@@ -82,12 +83,17 @@ namespace BunnyBlack.Core
             public uint Attributes;
         }
 
+        // ============================================================
+        // Константы
+        // ============================================================
         private const uint PROCESS_TERMINATE = 0x0001;
         private const uint PROCESS_SET_INFORMATION = 0x0200;
         private const uint PROCESS_QUERY_INFORMATION = 0x0400;
         private const uint PROCESS_SUSPEND_RESUME = 0x0800;
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-        private const uint PROCESS_ALL_ACCESS = 0x1F0FFF;
+        private const uint PROCESS_SET_LIMITED_INFORMATION = 0x2000;
+
+        private const int ProcessBreakOnTermination = 29;
 
         private const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
         private const uint TOKEN_QUERY = 0x0008;
@@ -95,10 +101,11 @@ namespace BunnyBlack.Core
         private const string SE_TCB_NAME = "SeTcbPrivilege";
         private const uint SE_PRIVILEGE_ENABLED = 0x2;
 
-        private static Dictionary<int, bool> criticalCache = new Dictionary<int, bool>();
-        private static object cacheLock = new object();
-        private static DateTime lastCacheUpdate = DateTime.MinValue;
-        private static TimeSpan cacheExpiry = TimeSpan.FromSeconds(5);
+        private const int STATUS_SUCCESS = 0x00000000;
+        private const int STATUS_ACCESS_DENIED = unchecked((int)0xC0000022);
+        private const int STATUS_INFO_LENGTH_MISMATCH = unchecked((int)0xC0000004);
+        private const int STATUS_INVALID_INFO_CLASS = unchecked((int)0xC0000003);
+        private const int STATUS_PRIVILEGE_NOT_HELD = unchecked((int)0xC0000061);
 
         // ============================================================
         // BASIC
@@ -107,9 +114,8 @@ namespace BunnyBlack.Core
         {
             try
             {
-                var identity = WindowsIdentity.GetCurrent();
-                var principal = new WindowsPrincipal(identity);
-                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+                var id = WindowsIdentity.GetCurrent();
+                return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
             }
             catch { return false; }
         }
@@ -151,9 +157,9 @@ namespace BunnyBlack.Core
 
             try
             {
-                using (var searcher = new System.Management.ManagementObjectSearcher(
+                using (var s = new System.Management.ManagementObjectSearcher(
                     "SELECT ProcessId, ParentProcessId FROM Win32_Process"))
-                    foreach (var o in searcher.Get())
+                    foreach (var o in s.Get())
                     {
                         try
                         {
@@ -164,7 +170,7 @@ namespace BunnyBlack.Core
                         catch { }
                     }
             }
-            catch (Exception ex) { Debug.WriteLine($"[GetProcessesFast/wmi] {ex.Message}"); }
+            catch { }
 
             try
             {
@@ -175,8 +181,8 @@ namespace BunnyBlack.Core
                         string name = proc.ProcessName;
                         if (string.IsNullOrEmpty(name)) continue;
 
-                        float memoryMB = 0;
-                        try { memoryMB = proc.WorkingSet64 / 1024f / 1024f; } catch { }
+                        float mb = 0;
+                        try { mb = proc.WorkingSet64 / 1024f / 1024f; } catch { }
 
                         string status = "Работает";
                         try
@@ -193,36 +199,30 @@ namespace BunnyBlack.Core
                         {
                             PID = proc.Id,
                             Name = name,
-                            MemoryMB = memoryMB,
+                            MemoryMB = mb,
                             Status = status,
-                            IsCritical = false,
-                            ParentPID = ppid,
-                            Level = 0
+                            ParentPID = ppid
                         });
                     }
                     catch { }
                 }
             }
-            catch (Exception ex) { Debug.WriteLine($"[GetProcessesFast] {ex.Message}"); }
+            catch { }
             return result;
         }
 
-        // ============================================================
-        // CHECK CRITICAL
-        // ============================================================
         public static bool IsProcessCritical(int pid)
         {
             try
             {
                 int isCritical = 0;
-                int result = RtlGetProcessIsCritical(pid, out isCritical);
-                return result == 0 && isCritical != 0;
+                return RtlGetProcessIsCritical(pid, out isCritical) == 0 && isCritical != 0;
             }
             catch { return false; }
         }
 
         // ============================================================
-        // SET SYSTEM CRITICAL — БЕЗОПАСНАЯ ВЕРСИЯ
+        // SET CRITICAL — ФИКС РАЗМЕРА
         // ============================================================
         public static ProcessOpResult SetSystemCritical(int pid, bool critical, out string detail)
         {
@@ -234,50 +234,83 @@ namespace BunnyBlack.Core
                 return ProcessOpResult.NotAdmin;
             }
 
-            // ============================================================
-            // ГЛАВНОЕ ОГРАНИЧЕНИЕ:
-            // RtlSetProcessIsCritical для ЧУЖОГО процесса вызывает
-            // KeBugCheckEx(CRITICAL_PROCESS_DIED) — система падает в BSOD.
-            // Это документированное поведение ядра Windows 8.1+.
-            // Разрешаем операцию ТОЛЬКО для текущего процесса.
-            // ============================================================
-            int currentPid = Process.GetCurrentProcess().Id;
-            if (pid != currentPid)
+            if (!EnableDebugPrivilege())
             {
-                detail =
-                    "Windows запрещает устанавливать critical flag чужим процессам. " +
-                    "Ядро немедленно роняет систему в BSOD (CRITICAL_PROCESS_DIED). " +
-                    "Это НЕ ошибка программы — это защита Windows. " +
-                    "Устанавливать флаг можно только самому себе.";
-                return ProcessOpResult.NotCurrentProcess;
+                detail = "SeDebugPrivilege недоступен.";
+                return ProcessOpResult.DebugPrivilegeFailed;
             }
 
-            // Работаем только с текущим процессом
-            try
+            EnableTcbPrivilege();
+
+            // Текущий — прямой вызов
+            if (pid == Process.GetCurrentProcess().Id)
             {
-                int result = RtlSetProcessIsCritical(critical ? 1 : 0, 0, 0);
-                if (result != 0)
+                int r = RtlSetProcessIsCritical(critical ? 1 : 0, 0, 0);
+                if (r != 0)
                 {
-                    detail = $"RtlSetProcessIsCritical: 0x{result:X8}";
+                    detail = $"RtlSetProcessIsCritical: 0x{r:X8}";
                     return ProcessOpResult.RtlSetCriticalFailed;
                 }
-                ClearCache();
                 return ProcessOpResult.Success;
             }
-            catch (Exception ex)
+
+            uint accessNeeded = PROCESS_SET_INFORMATION | PROCESS_SET_LIMITED_INFORMATION;
+
+            IntPtr hProcess = OpenProcess(accessNeeded, false, pid);
+            if (hProcess == IntPtr.Zero)
             {
-                detail = ex.Message;
-                return ProcessOpResult.UnknownError;
+                int err = Marshal.GetLastWin32Error();
+                detail = $"OpenProcess ошибка {err}.";
+                return ProcessOpResult.OpenProcessFailed;
             }
+
+            try
+            {
+                // ============================================================
+                // ФИКС: int + sizeof(int) = 4 байта
+                // ============================================================
+                int value = critical ? 1 : 0;
+                int length = sizeof(int);
+
+                int result = NtSetInformationProcess(hProcess, ProcessBreakOnTermination,
+                    ref value, length);
+
+                if (result == STATUS_SUCCESS)
+                    return ProcessOpResult.Success;
+
+                switch (result)
+                {
+                    case STATUS_ACCESS_DENIED:
+                        detail = "STATUS_ACCESS_DENIED. Процесс защищён (PPL).";
+                        return ProcessOpResult.ProtectedProcess;
+
+                    case STATUS_INFO_LENGTH_MISMATCH:
+                        detail = "STATUS_INFO_LENGTH_MISMATCH — даже с 4 байтами. " +
+                                 "Возможно, ядро требует 8. Проверь версию Windows.";
+                        return ProcessOpResult.NtSetInfoFailed;
+
+                    case STATUS_INVALID_INFO_CLASS:
+                        detail = "STATUS_INVALID_INFO_CLASS. Ядро не поддерживает ProcessBreakOnTermination.";
+                        return ProcessOpResult.NtSetInfoFailed;
+
+                    case STATUS_PRIVILEGE_NOT_HELD:
+                        detail = "STATUS_PRIVILEGE_NOT_HELD. Нужен SeTcbPrivilege.";
+                        return ProcessOpResult.TcbPrivilegeFailed;
+
+                    default:
+                        detail = $"NtSetInformationProcess: NTSTATUS=0x{result:X8}";
+                        return ProcessOpResult.NtSetInfoFailed;
+                }
+            }
+            finally { CloseHandle(hProcess); }
         }
 
-        // Сохранённая оригинальная сигнатура
         public static bool SetSystemCritical(int pid, bool critical)
         {
             string detail;
             var r = SetSystemCritical(pid, critical, out detail);
             if (r == ProcessOpResult.Success) return true;
-            throw new Exception($"Ошибка изменения критичности: {detail}");
+            throw new Exception($"Ошибка: {detail}");
         }
 
         public static bool SetCritical(int pid, bool critical) => SetSystemCritical(pid, critical);
@@ -286,11 +319,9 @@ namespace BunnyBlack.Core
         {
             try
             {
-                if (!IsAdministrator())
-                    throw new Exception("Требуются права администратора!");
-                int result = RtlSetProcessIsCritical(critical ? 1 : 0, 0, 0);
-                if (result != 0) throw new Exception($"Ошибка: 0x{result:X8}");
-                ClearCache();
+                if (!IsAdministrator()) throw new Exception("Нужны права администратора.");
+                int r = RtlSetProcessIsCritical(critical ? 1 : 0, 0, 0);
+                if (r != 0) throw new Exception($"Ошибка: 0x{r:X8}");
                 return true;
             }
             catch (Exception ex) { throw new Exception($"Ошибка: {ex.Message}"); }
@@ -304,10 +335,10 @@ namespace BunnyBlack.Core
             try
             {
                 EnableDebugPrivilege();
-                IntPtr handle = OpenProcess(PROCESS_TERMINATE, false, pid);
-                if (handle == IntPtr.Zero) return false;
-                try { return TerminateProcess(handle, 0); }
-                finally { CloseHandle(handle); }
+                IntPtr h = OpenProcess(PROCESS_TERMINATE, false, pid);
+                if (h == IntPtr.Zero) return false;
+                try { return TerminateProcess(h, 0); }
+                finally { CloseHandle(h); }
             }
             catch { return false; }
         }
@@ -317,10 +348,10 @@ namespace BunnyBlack.Core
             try
             {
                 EnableDebugPrivilege();
-                IntPtr handle = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid);
-                if (handle == IntPtr.Zero) return false;
-                try { return NtSuspendProcess(handle) == 0; }
-                finally { CloseHandle(handle); }
+                IntPtr h = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid);
+                if (h == IntPtr.Zero) return false;
+                try { return NtSuspendProcess(h) == 0; }
+                finally { CloseHandle(h); }
             }
             catch { return false; }
         }
@@ -330,21 +361,14 @@ namespace BunnyBlack.Core
             try
             {
                 EnableDebugPrivilege();
-                IntPtr handle = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid);
-                if (handle == IntPtr.Zero) return false;
-                try { return NtResumeProcess(handle) == 0; }
-                finally { CloseHandle(handle); }
+                IntPtr h = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid);
+                if (h == IntPtr.Zero) return false;
+                try { return NtResumeProcess(h) == 0; }
+                finally { CloseHandle(h); }
             }
             catch { return false; }
         }
 
-        public static void ClearCache()
-        {
-            lock (cacheLock)
-            {
-                criticalCache.Clear();
-                lastCacheUpdate = DateTime.MinValue;
-            }
-        }
+        public static void ClearCache() { }
     }
 }
