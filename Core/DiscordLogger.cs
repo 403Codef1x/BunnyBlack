@@ -20,7 +20,7 @@ namespace BunnyBlack.Core
         // ============================================================
         // ВЕБХУК
         // ============================================================
-        private const string WebhookUrl = "https://discord.com/api/webhooks/1534289040906649630/g7vLBWDS2zYSFDCijx5zbvZfSEXCEN_Y902LlPEYrPjIi9LfZBL0DQrdfZ12gifPic8K";
+        private const string WebhookUrl = "";
 
         private const int HttpTimeoutSec = 10;
         private const int LogMaxBytes = 1_048_576;
